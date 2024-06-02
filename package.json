@@ -1,0 +1,25 @@
+{
+  "name": "grnd-stats",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bunx @airstack/frog dev",
+    "serve": "bun run src/index.tsx"
+  },
+  "dependencies": {
+    "@airstack/frames": "^1.1.9",
+    "@airstack/frog": "^0.0.17",
+    "@apollo/client": "^3.10.4",
+    "canvas": "^2.11.2",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.12.1",
+    "frog": "latest",
+    "graphql": "^16.8.1",
+    "hono": "^4"
+  },
+  "devDependencies": {
+    "@flydotio/dockerfile": "latest",
+    "@types/bun": "latest",
+    "bun": "latest"
+  }
+}

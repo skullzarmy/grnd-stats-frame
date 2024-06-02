@@ -7,10 +7,93 @@ import {
     FarcasterUserERC20BalancesOutput,
     checkTokenHoldByFarcasterUser,
     getFarcasterUserDetails,
+    searchFarcasterUsers,
+    SearchFarcasterUsersInput,
+    SearchFarcastersOutput,
+    fetchQuery,
 } from "@airstack/frames";
 import { devtools } from "frog/dev";
 import { serveStatic } from "frog/serve-static";
-import { resolveInputToFID } from "./resolveFid";
+
+// Function to get FID from wallet address using Airstack
+async function getFidFromWallet(walletAddress: string) {
+    const { data, error } = await fetchQuery(/* GraphQL */ `
+        query GetFarcasterUserFromWallet {
+            Socials(
+                input: {
+                    filter: {
+                        userAssociatedAddresses: { _eq: "${walletAddress}" }
+                        dappName: { _eq: farcaster }
+                    }
+                    blockchain: ethereum
+                }
+            ) {
+                Social {
+                    dappName
+                    profileName
+                    userId
+                    connectedAddresses {
+                        address
+                        blockchain
+                    }
+                }
+            }
+        }
+    `);
+
+    if (error) throw new Error(error);
+
+    return data.Socials.Social[0].userId;
+}
+
+// Function to get FID from Farcaster username using Airstack
+async function getFidFromUsername(username: string) {
+    const { data } = await searchFarcasterUsers({ profileName: username });
+    // if return is empty, return null, else search for exact string match and return fid, else return top result
+    let dreturn = null;
+    if (data && data.length > 0) {
+        for (let i = 0; i < data.length; i++) {
+            if (data[i]?.profileName === username) {
+                dreturn = data[i]?.fid;
+                break;
+            }
+        }
+        if (dreturn === null) {
+            dreturn = data[0]?.fid;
+        }
+    }
+    // const dreturn = data && data.length > 0 ? data[0].fid : null;
+    return dreturn;
+}
+
+// Function to resolve input to FID
+export async function resolveInputToFID(inputText) {
+    let fid;
+    if (!inputText) {
+        return null;
+    }
+
+    // Check if the inputText is a number
+    if (!isNaN(inputText) && !/^0x[a-fA-F0-9]{40}$/.test(inputText)) {
+        // console.log("Input is a number");
+        fid = inputText;
+        // console.log("FID from number: ", fid);
+    } else {
+        const isWalletAddress = /^0x[a-fA-F0-9]{40}$/.test(inputText);
+
+        if (isWalletAddress) {
+            // console.log("Wallet address detected");
+            fid = await getFidFromWallet(inputText);
+            // console.log("FID from wallet address: ", fid);
+        } else {
+            // console.log("Not a wallet address, checking for username");
+            fid = await getFidFromUsername(inputText);
+            // console.log("FID from username: ", fid);
+        }
+    }
+
+    return fid;
+}
 
 const onchainDataMiddleware = onchainData({
     env: "dev",
@@ -58,7 +141,7 @@ app.frame("/", onchainDataMiddleware, async function (c) {
                 }}
             >
                 <img
-                    src="http://localhost:5173/logo.png"
+                    src="https://grnd-stats.fly.dev/logo.png"
                     alt="UNDRGRND logo"
                     style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
                 />
@@ -85,7 +168,7 @@ app.frame("/", onchainDataMiddleware, async function (c) {
             </div>
         ),
         intents: [
-            <TextInput placeholder={`Enter any fid, username, wallet, or ENS.`} />,
+            <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
             <Button>🔎</Button>,
             <Button.Reset>Reset</Button.Reset>,
             <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
@@ -130,7 +213,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                     }}
                 >
                     <img
-                        src="http://localhost:5173/logo.png"
+                        src="https://grnd-stats.fly.dev/logo.png"
                         alt="UNDRGRND logo"
                         style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
                     />
@@ -155,7 +238,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                             top: "20%",
                         }}
                     >
-                        <div style={{ marginBottom: "5px", fontSize: "6em" }}>🛑</div>
+                        <div style={{ marginBottom: "5px", fontSize: "6em" }}>🚫</div>
                         <div style={{ marginBottom: "20px", display: "flex" }}>
                             USER{" "}
                             {inputText ? "'" + inputText + "'" : urlParamInputText ? "'" + urlParamInputText + "'" : ""}{" "}
@@ -166,7 +249,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                 </div>
             ),
             intents: [
-                <TextInput placeholder={`Enter any fid, username, wallet, or ENS.`} />,
+                <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
                 <Button>🔎</Button>,
                 <Button.Reset>Reset</Button.Reset>,
                 <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
@@ -181,7 +264,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
     return c.res({
         image: `/img/stat/${customFID}`,
         intents: [
-            <TextInput placeholder={`Enter any fid, username, wallet, or ENS.`} />,
+            <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
             <Button>🔎</Button>,
             <Button.Reset>Reset</Button.Reset>,
             <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
@@ -240,7 +323,7 @@ app.image("/img/stat/:fid", async (c) => {
                 }}
             >
                 <img
-                    src="http://localhost:5173/logo.png"
+                    src="https://grnd-stats.fly.dev/logo.png"
                     alt="UNDRGRND logo"
                     style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.1 }}
                 />

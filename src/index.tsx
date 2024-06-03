@@ -8,15 +8,13 @@ import {
     checkTokenHoldByFarcasterUser,
     getFarcasterUserDetails,
     searchFarcasterUsers,
-    SearchFarcasterUsersInput,
-    SearchFarcastersOutput,
     fetchQuery,
 } from "@airstack/frames";
 import { devtools } from "frog/dev";
 import { serveStatic } from "frog/serve-static";
 
 // Function to get FID from wallet address using Airstack
-async function getFidFromWallet(walletAddress: string) {
+async function getFidFromWallet(walletAddress: string): Promise<string | null> {
     const { data, error } = await fetchQuery(/* GraphQL */ `
         query GetFarcasterUserFromWallet {
             Socials(
@@ -29,13 +27,7 @@ async function getFidFromWallet(walletAddress: string) {
                 }
             ) {
                 Social {
-                    dappName
-                    profileName
                     userId
-                    connectedAddresses {
-                        address
-                        blockchain
-                    }
                 }
             }
         }
@@ -43,59 +35,32 @@ async function getFidFromWallet(walletAddress: string) {
 
     if (error) throw new Error(error);
 
-    return data.Socials.Social[0].userId;
+    return data?.Socials?.Social[0]?.userId ?? null;
 }
 
 // Function to get FID from Farcaster username using Airstack
-async function getFidFromUsername(username: string) {
+async function getFidFromUsername(username: string): Promise<string | null> {
     const { data } = await searchFarcasterUsers({ profileName: username });
-    // if return is empty, return null, else search for exact string match and return fid, else return top result
-    let dreturn = null;
     if (data && data.length > 0) {
-        for (let i = 0; i < data.length; i++) {
-            if (data[i]?.profileName === username) {
-                dreturn = data[i]?.fid;
-                break;
-            }
-        }
-        if (dreturn === null) {
-            dreturn = data[0]?.fid;
-        }
+        return data.find((user) => user.profileName === username)?.fid ?? data[0].fid;
     }
-    // const dreturn = data && data.length > 0 ? data[0].fid : null;
-    return dreturn;
+    return null;
 }
 
 // Function to resolve input to FID
-async function resolveInputToFID(inputText) {
-    let fid;
-    if (!inputText) {
-        return null;
-    }
+async function resolveInputToFID(inputText: string): Promise<string | null> {
+    if (!inputText) return null;
 
-    // Check if the inputText is a number
-    if (!isNaN(inputText) && !/^0x[a-fA-F0-9]{40}$/.test(inputText)) {
-        // console.log("Input is a number");
-        fid = inputText;
-        // console.log("FID from number: ", fid);
+    if (!isNaN(Number(inputText)) && !/^0x[a-fA-F0-9]{40}$/.test(inputText)) {
+        return inputText;
+    } else if (/^0x[a-fA-F0-9]{40}$/.test(inputText)) {
+        return await getFidFromWallet(inputText);
     } else {
-        const isWalletAddress = /^0x[a-fA-F0-9]{40}$/.test(inputText);
-
-        if (isWalletAddress) {
-            // console.log("Wallet address detected");
-            fid = await getFidFromWallet(inputText);
-            // console.log("FID from wallet address: ", fid);
-        } else {
-            // console.log("Not a wallet address, checking for username");
-            fid = await getFidFromUsername(inputText);
-            // console.log("FID from username: ", fid);
-        }
+        return await getFidFromUsername(inputText);
     }
-
-    return fid;
 }
 
-function formatNumber(num) {
+function formatNumber(num: number): string {
     if (num >= 1_000_000_000_000) {
         return (num / 1_000_000_000_000).toFixed(1) + "T";
     } else if (num >= 1_000_000_000) {
@@ -119,6 +84,48 @@ const onchainDataMiddleware = onchainData({
     },
 });
 
+async function getTokenTransfers(fromAddress: string, toAddress: string): Promise<any> {
+    const query = `
+        query GetTransactions {
+            Base: TokenTransfers(
+                input: {
+                    filter: {
+                        from: { _eq: "${fromAddress}" },
+                        to: { _eq: "${toAddress}" }
+                    },
+                    blockchain: base,
+                    limit: 50
+                }
+            ) {
+                TokenTransfer {
+                    id
+                    from {
+                        identity
+                    }
+                    to {
+                        identity
+                    }
+                    type
+                    tokenAddress
+                    amount
+                    formattedAmount
+                }
+            }
+        }
+    `;
+    try {
+        // console.log("Fetching token transfers...");
+        // console.log("Query:", query);
+        const { data, error } = await fetchQuery(query);
+        if (error) throw new Error(JSON.stringify(error));
+
+        return data.Base.TokenTransfer;
+    } catch (err) {
+        console.error("Error fetching token transfers:", err);
+        throw err;
+    }
+}
+
 export const app = new Frog({
     apiKey: process.env.AIRSTACK_API_KEY as string,
     imageAspectRatio: "1:1",
@@ -133,7 +140,6 @@ export const app = new Frog({
 });
 
 app.frame("/", onchainDataMiddleware, async function (c) {
-    const { buttonValue, inputText, status } = c;
     return c.res({
         action: "/stats",
         image: (
@@ -181,19 +187,16 @@ app.frame("/", onchainDataMiddleware, async function (c) {
             </div>
         ),
         intents: [
-            <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
+            <TextInput placeholder="FID, username, wallet, or ENS." />,
             <Button>🔎</Button>,
-            <Button.Reset>Reset</Button.Reset>,
-            <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
-                Mint Pass
-            </Button.Redirect>,
+            <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip</Button.Redirect>,
         ],
         title: "UNDRGRND Stats",
     });
 });
 
 app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
-    const { buttonValue, inputText, status } = c;
+    const { inputText } = c;
     const urlParamInputText = c.req.param("inputText");
     let customFID = "1";
 
@@ -205,39 +208,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
         customFID = await resolveInputToFID(c.var.userDetails?.profileName);
     }
 
-    // claim data
-    const claimData = await fetchQuery(/* GraphQL */ `
-        query GetTokenTransfers {
-            Base: TokenTransfers(
-                input: {
-                    filter: {
-                        from: { _eq: "0x20bc4c4f593067d298fdcc14a60fef5dfc93fd8e" }
-                        tokenAddress: { _eq: "0xd94393cd7fcceb749cd844e89167d4a2cdc64541" }
-                        type: { _eq: TRANSFER }
-                        formattedAmount: { _gt: 1000000000 }
-                        blockTimestamp: { _gte: "2024-06-01T13:53:17Z" }
-                    }
-                    blockchain: base
-                    limit: 200
-                    order: { blockTimestamp: ASC }
-                }
-            ) {
-                TokenTransfer {
-                    to {
-                        identity
-                    }
-                    blockTimestamp
-                }
-            }
-        }
-    `);
-    const claimsArray = claimData.data.Base.TokenTransfer.map((claim) => {
-        return {
-            address: claim.to.identity,
-            timestamp: claim.blockTimestamp,
-        };
-    });
-    const currentClaimAddress = claimsArray[0].address;
+    const currentClaimAddress = "0x3537e2cfb33b54c0c0668fcb951c6ffd882a351a";
 
     if (!customFID) {
         return c.res({
@@ -287,18 +258,16 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                     >
                         <div style={{ marginBottom: "5px", fontSize: "6em" }}>🚫</div>
                         <div style={{ marginBottom: "20px", display: "flex" }}>
-                            USER{" "}
-                            {inputText ? "'" + inputText + "'" : urlParamInputText ? "'" + urlParamInputText + "'" : ""}{" "}
-                            NOT FOUND 😢
+                            USER {inputText ? `'${inputText}'` : urlParamInputText ? `'${urlParamInputText}'` : ""} NOT
+                            FOUND 😢
                         </div>
                         <div style={{ marginBottom: "20px" }}>PLEASE TRY ANOTHER INPUT</div>
                     </div>
                 </div>
             ),
             intents: [
-                <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
+                <TextInput placeholder="FID, username, wallet, or ENS." />,
                 <Button>🔎</Button>,
-                // <Button.Reset>Reset</Button.Reset>,
                 <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
                     Get Pass
                 </Button.Redirect>,
@@ -314,9 +283,8 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
     return c.res({
         image: `/img/stat/${customFID}`,
         intents: [
-            <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
+            <TextInput placeholder="FID, username, wallet, or ENS." />,
             <Button>🔎</Button>,
-            // <Button.Reset>Reset</Button.Reset>,
             <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
                 Get Pass
             </Button.Redirect>,
@@ -331,18 +299,17 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
 
 app.image("/img/stat/:fid", async (c) => {
     const { fid } = c.req.param();
-    const userDetails = await getFarcasterUserDetails({ fid: fid });
+    const userDetails = await getFarcasterUserDetails({ fid });
     const grndInput: FarcasterUserERC20BalancesInput = {
         fid: parseInt(fid, 10),
         chains: [TokenBlockchain.Base],
         limit: 100,
     };
-    const { data, error, hasNextPage, hasPrevPage, getNextPage, getPrevPage }: FarcasterUserERC20BalancesOutput =
-        await getFarcasterUserERC20Balances(grndInput);
+    const { data, error }: FarcasterUserERC20BalancesOutput = await getFarcasterUserERC20Balances(grndInput);
     const grndBalance = data
-        ?.filter((d) => d?.tokenAddress === "0xd94393cd7fcceb749cd844e89167d4a2cdc64541")
+        ?.filter((d) => d.tokenAddress === "0xd94393cd7fcceb749cd844e89167d4a2cdc64541")
         .reduce((total, current) => total + (current?.amount || 0), 0);
-    // console.log("GRND Balance", grndBalance);
+
     const ssnPass1Minted = await checkTokenHoldByFarcasterUser({
         fid: parseInt(fid, 10),
         token: [
@@ -352,57 +319,36 @@ app.image("/img/stat/:fid", async (c) => {
             },
         ],
     });
-    const profileName = userDetails?.data?.profileName;
-    const passHolderColor = ssnPass1Minted.data[0].isHold ? "green" : "red";
-    const safeProfileImageUrl = userDetails?.data?.profileImage?.extraSmall
-        ? userDetails.data.profileImage.extraSmall
-        : null;
 
-    // claim data
-    const claimData = await fetchQuery(/* GraphQL */ `
-        query GetTokenTransfers {
-            Base: TokenTransfers(
-                input: {
-                    filter: {
-                        from: { _eq: "0x20bc4c4f593067d298fdcc14a60fef5dfc93fd8e" }
-                        tokenAddress: { _eq: "0xd94393cd7fcceb749cd844e89167d4a2cdc64541" }
-                        type: { _eq: TRANSFER }
-                        formattedAmount: { _gt: 1000000000 }
-                        blockTimestamp: { _gte: "2024-06-01T13:53:17Z" }
-                    }
-                    blockchain: base
-                    limit: 200
-                    order: { blockTimestamp: ASC }
-                }
-            ) {
-                TokenTransfer {
-                    to {
-                        identity
-                    }
-                    blockTimestamp
-                }
+    const profileName = userDetails?.data?.profileName;
+    const passHolderColor = ssnPass1Minted.data[0]?.isHold ? "green" : "red";
+    const safeProfileImageUrl = userDetails?.data?.profileImage?.extraSmall ?? null;
+    let claims = [];
+    let unclaimed = [];
+    let claimed = [];
+
+    if (ssnPass1Minted.data[0]?.isHold) {
+        // loop userDetails.data?.connectedAddresses and get all claims for all addresses
+        for (let i = 0; i < userDetails.data?.connectedAddresses.length; i++) {
+            // console.log("Getting claims for address:", userDetails.data?.connectedAddresses[i].address);
+            const addressClaims = await getTokenTransfers(
+                "0x20bc4c4f593067d298fdcc14a60fef5dfc93fd8e",
+                userDetails.data?.connectedAddresses[i].address
+            );
+            if (addressClaims) {
+                claims = claims.concat(addressClaims);
             }
         }
-    `);
-    const claimsArray = claimData.data.Base.TokenTransfer.map((claim) => {
-        return {
+
+        // console.log("Claims:", claims);
+        const userClaims = (claims || []).map((claim) => ({
             address: claim.to.identity,
             timestamp: claim.blockTimestamp,
-        };
-    });
-    const currentClaimAddress = claimsArray[0].address;
-    // loop through claimsArray and use fetchquery to see if the user has interacted with the contract
-    let userClaims = [];
-    for (let i = 0; i < claimsArray.length; i++) {
-        const claim = claimsArray[i];
-        const claimUser = await getFarcasterUserDetails({ fid: claim.address });
-        userClaims.push({
-            address: claim.address,
-            timestamp: claim.timestamp,
-        });
+        }));
+
+        unclaimed = userClaims.filter((claim) => claim.address === fid);
+        claimed = userClaims.filter((claim) => claim.address !== fid);
     }
-    const unclaimed = userClaims.filter((claim) => claim.address === fid);
-    const claimed = userClaims.filter((claim) => claim.address !== fid);
 
     return c.res({
         image: (

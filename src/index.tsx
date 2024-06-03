@@ -67,7 +67,7 @@ async function getFidFromUsername(username: string) {
 }
 
 // Function to resolve input to FID
-export async function resolveInputToFID(inputText) {
+async function resolveInputToFID(inputText) {
     let fid;
     if (!inputText) {
         return null;
@@ -93,6 +93,19 @@ export async function resolveInputToFID(inputText) {
     }
 
     return fid;
+}
+
+function formatNumber(num) {
+    if (num >= 1_000_000_000_000) {
+        return (num / 1_000_000_000_000).toFixed(1) + "T";
+    } else if (num >= 1_000_000_000) {
+        return (num / 1_000_000_000).toFixed(1) + "B";
+    } else if (num >= 1_000_000) {
+        return (num / 1_000_000).toFixed(1) + "M";
+    } else if (num >= 1_000) {
+        return (num / 1_000).toFixed(1) + "K";
+    }
+    return num.toLocaleString();
 }
 
 const onchainDataMiddleware = onchainData({
@@ -192,6 +205,40 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
         customFID = await resolveInputToFID(c.var.userDetails?.profileName);
     }
 
+    // claim data
+    const claimData = await fetchQuery(/* GraphQL */ `
+        query GetTokenTransfers {
+            Base: TokenTransfers(
+                input: {
+                    filter: {
+                        from: { _eq: "0x20bc4c4f593067d298fdcc14a60fef5dfc93fd8e" }
+                        tokenAddress: { _eq: "0xd94393cd7fcceb749cd844e89167d4a2cdc64541" }
+                        type: { _eq: TRANSFER }
+                        formattedAmount: { _gt: 1000000000 }
+                        blockTimestamp: { _gte: "2024-06-01T13:53:17Z" }
+                    }
+                    blockchain: base
+                    limit: 200
+                    order: { blockTimestamp: ASC }
+                }
+            ) {
+                TokenTransfer {
+                    to {
+                        identity
+                    }
+                    blockTimestamp
+                }
+            }
+        }
+    `);
+    const claimsArray = claimData.data.Base.TokenTransfer.map((claim) => {
+        return {
+            address: claim.to.identity,
+            timestamp: claim.blockTimestamp,
+        };
+    });
+    const currentClaimAddress = claimsArray[0].address;
+
     if (!customFID) {
         return c.res({
             action: "/stats",
@@ -251,11 +298,14 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
             intents: [
                 <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
                 <Button>🔎</Button>,
-                <Button.Reset>Reset</Button.Reset>,
+                // <Button.Reset>Reset</Button.Reset>,
                 <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
                     Get Pass
                 </Button.Redirect>,
-                <Button.Redirect location="https://www.undrgrnd.io/claim/">Claim</Button.Redirect>,
+                <Button.Redirect location={`https://app.stationx.network/claim/${currentClaimAddress}/0x2105`}>
+                    Claim
+                </Button.Redirect>,
+                <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip Jar</Button.Redirect>,
             ],
             title: "UNDRGRND Stats",
         });
@@ -266,11 +316,14 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
         intents: [
             <TextInput placeholder={`FID, username, wallet, or ENS.`} />,
             <Button>🔎</Button>,
-            <Button.Reset>Reset</Button.Reset>,
+            // <Button.Reset>Reset</Button.Reset>,
             <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
                 Get Pass
             </Button.Redirect>,
-            <Button.Redirect location="https://www.undrgrnd.io/claim/">Claim</Button.Redirect>,
+            <Button.Redirect location={`https://app.stationx.network/claim/${currentClaimAddress}/0x2105`}>
+                Claim
+            </Button.Redirect>,
+            <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip Jar</Button.Redirect>,
         ],
         title: "UNDRGRND Stats",
     });
@@ -304,6 +357,53 @@ app.image("/img/stat/:fid", async (c) => {
     const safeProfileImageUrl = userDetails?.data?.profileImage?.extraSmall
         ? userDetails.data.profileImage.extraSmall
         : null;
+
+    // claim data
+    const claimData = await fetchQuery(/* GraphQL */ `
+        query GetTokenTransfers {
+            Base: TokenTransfers(
+                input: {
+                    filter: {
+                        from: { _eq: "0x20bc4c4f593067d298fdcc14a60fef5dfc93fd8e" }
+                        tokenAddress: { _eq: "0xd94393cd7fcceb749cd844e89167d4a2cdc64541" }
+                        type: { _eq: TRANSFER }
+                        formattedAmount: { _gt: 1000000000 }
+                        blockTimestamp: { _gte: "2024-06-01T13:53:17Z" }
+                    }
+                    blockchain: base
+                    limit: 200
+                    order: { blockTimestamp: ASC }
+                }
+            ) {
+                TokenTransfer {
+                    to {
+                        identity
+                    }
+                    blockTimestamp
+                }
+            }
+        }
+    `);
+    const claimsArray = claimData.data.Base.TokenTransfer.map((claim) => {
+        return {
+            address: claim.to.identity,
+            timestamp: claim.blockTimestamp,
+        };
+    });
+    const currentClaimAddress = claimsArray[0].address;
+    // loop through claimsArray and use fetchquery to see if the user has interacted with the contract
+    let userClaims = [];
+    for (let i = 0; i < claimsArray.length; i++) {
+        const claim = claimsArray[i];
+        const claimUser = await getFarcasterUserDetails({ fid: claim.address });
+        userClaims.push({
+            address: claim.address,
+            timestamp: claim.timestamp,
+        });
+    }
+    const unclaimed = userClaims.filter((claim) => claim.address === fid);
+    const claimed = userClaims.filter((claim) => claim.address !== fid);
+
     return c.res({
         image: (
             <div
@@ -365,17 +465,18 @@ app.image("/img/stat/:fid", async (c) => {
                                 borderRadius: "8px",
                                 width: "100%",
                                 textAlign: "left",
+                                fontWeight: "800",
                                 color: passHolderColor,
                             }}
                         >
                             <strong>Never Sellout Vol.01:</strong>{" "}
-                            {ssnPass1Minted.data[0].isHold ? "HODLR 💎🤲" : "👎🚫😢"}
+                            {ssnPass1Minted?.data[0]?.isHold ? "HODLR 💎🤲" : "👎🚫😢"}
                         </div>
                         <div
                             style={{
                                 display: "flex",
                                 justifyContent: "space-between",
-                                margin: "10px 0",
+                                margin: "5px 0",
                                 padding: "10px",
                                 backgroundColor: "transparent",
                                 borderRadius: "8px",
@@ -383,13 +484,16 @@ app.image("/img/stat/:fid", async (c) => {
                                 textAlign: "left",
                             }}
                         >
-                            <strong>Daily Claimable:</strong> {ssnPass1Minted.data[0].isHold ? "500K" : "0"}
+                            <strong>Unclaimed:</strong>{" "}
+                            {ssnPass1Minted?.data[0]?.isHold
+                                ? formatNumber(500000 * unclaimed.length) + " $GRND"
+                                : "🚫"}
                         </div>
                         <div
                             style={{
                                 display: "flex",
                                 justifyContent: "space-between",
-                                margin: "10px 0",
+                                margin: "5px 0",
                                 padding: "10px",
                                 backgroundColor: "transparent",
                                 borderRadius: "8px",
@@ -397,7 +501,8 @@ app.image("/img/stat/:fid", async (c) => {
                                 textAlign: "left",
                             }}
                         >
-                            <strong>Daily Claimed:</strong> SOON
+                            <strong>Claimed:</strong>{" "}
+                            {ssnPass1Minted?.data[0]?.isHold ? formatNumber(500000 * claimed.length) + " $GRND" : "🚫"}
                         </div>
                         <div
                             style={{

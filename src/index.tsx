@@ -137,6 +137,7 @@ export const app = new Frog({
             },
         },
     },
+    browserLocation: "/browser.html",
 });
 
 app.frame("/", onchainDataMiddleware, async function (c) {
@@ -271,9 +272,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                 <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
                     Get Pass
                 </Button.Redirect>,
-                <Button.Redirect location={`https://app.stationx.network/claim/${currentClaimAddress}/0x2105`}>
-                    Claim
-                </Button.Redirect>,
+                <Button.Redirect location={`https://undrgrnd.io/claim`}>Claim</Button.Redirect>,
                 <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip Jar</Button.Redirect>,
             ],
             title: "UNDRGRND Stats",
@@ -288,9 +287,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
             <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
                 Get Pass
             </Button.Redirect>,
-            <Button.Redirect location={`https://app.stationx.network/claim/${currentClaimAddress}/0x2105`}>
-                Claim
-            </Button.Redirect>,
+            <Button.Redirect location={`https://undrgrnd.io/claim`}>Claim</Button.Redirect>,
             <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip Jar</Button.Redirect>,
         ],
         title: "UNDRGRND Stats",

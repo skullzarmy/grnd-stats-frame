@@ -273,7 +273,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                     Get Pass
                 </Button.Redirect>,
                 <Button.Redirect location={`https://undrgrnd.io/claim`}>Claim</Button.Redirect>,
-                <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip Jar</Button.Redirect>,
+                <Button.Redirect location="https://warpcast.com/skllzrmy/0xd55fe1b1">Tip Jar</Button.Redirect>,
             ],
             title: "UNDRGRND Stats",
         });
@@ -288,7 +288,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                 Get Pass
             </Button.Redirect>,
             <Button.Redirect location={`https://undrgrnd.io/claim`}>Claim</Button.Redirect>,
-            <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip Jar</Button.Redirect>,
+            <Button.Redirect location="https://warpcast.com/skllzrmy/0xd55fe1b1">Tip Jar</Button.Redirect>,
         ],
         title: "UNDRGRND Stats",
     });
@@ -304,7 +304,7 @@ app.image("/img/stat/:fid", async (c) => {
     };
     const { data, error }: FarcasterUserERC20BalancesOutput = await getFarcasterUserERC20Balances(grndInput);
     const grndBalance = data
-        ?.filter((d) => d.tokenAddress === "0xd94393cd7fcceb749cd844e89167d4a2cdc64541")
+        ?.filter((d) => d?.tokenAddress === "0xd94393cd7fcceb749cd844e89167d4a2cdc64541")
         .reduce((total, current) => total + (current?.amount || 0), 0);
 
     const ssnPass1Minted = await checkTokenHoldByFarcasterUser({

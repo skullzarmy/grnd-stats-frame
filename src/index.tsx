@@ -185,6 +185,23 @@ app.frame("/", onchainDataMiddleware, async function (c) {
                     <div style={{ marginBottom: "20px" }}>Welcome to UNDRGRND!</div>
                     <div style={{ marginBottom: "20px" }}>Check your stats below 👇</div>
                 </div>
+                <div
+                    class="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "150px", display: "flex" }}
+                    />
+                </div>
             </div>
         ),
         intents: [
@@ -263,6 +280,23 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
                             FOUND 😢
                         </div>
                         <div style={{ marginBottom: "20px" }}>PLEASE TRY ANOTHER INPUT</div>
+                    </div>
+                    <div
+                        class="footer"
+                        style={{
+                            display: "flex",
+                            backgroundColor: "white",
+                            padding: "10px",
+                            margin: "15px auto",
+                            borderRadius: "15px",
+                            border: "2px dashed #000",
+                        }}
+                    >
+                        <img
+                            src="https://grnd-stats.fly.dev/skllzrmy.png"
+                            alt="skllzrmys logo"
+                            style={{ width: "150px", display: "flex" }}
+                        />
                     </div>
                 </div>
             ),
@@ -463,6 +497,23 @@ app.image("/img/stat/:fid", async (c) => {
                             <strong>$GRND Balance:</strong> {grndBalance ? grndBalance.toLocaleString() : "0"}
                         </div>
                     </div>
+                </div>
+                <div
+                    class="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "150px", display: "flex" }}
+                    />
                 </div>
             </div>
         ),

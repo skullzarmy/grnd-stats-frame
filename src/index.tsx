@@ -226,7 +226,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async function (c) {
         customFID = await resolveInputToFID(c.var.userDetails?.profileName);
     }
 
-    const currentClaimAddress = "0x3537e2cfb33b54c0c0668fcb951c6ffd882a351a";
+    const currentClaimAddress = "0x0d330286b454f1e1bc731e083a78b2957b8f0ea2";
 
     if (!customFID) {
         return c.res({

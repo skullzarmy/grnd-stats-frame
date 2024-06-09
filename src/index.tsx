@@ -140,6 +140,92 @@ export const app = new Frog({
     browserLocation: "/browser.html",
 });
 
+// Cast actions
+app.castAction(
+    "/grnd-stats",
+    (c) => {
+        return c.res({ type: "frame", path: "/stats" });
+    },
+    {
+        name: "Check GRND Stats",
+        icon: "graph",
+    }
+);
+
+app.frame("/cast-action", async function (c) {
+    return c.res({
+        action: "/stats",
+        image: (
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    background: "black",
+                    backgroundSize: "100% 100%",
+                    height: "100%",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    width: "100%",
+                    padding: "20px",
+                    borderRadius: "15px",
+                    boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
+                }}
+            >
+                <img
+                    src="https://grnd-stats.fly.dev/logo.png"
+                    alt="UNDRGRND logo"
+                    style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
+                />
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        color: "white",
+                        fontSize: "1.5em",
+                        fontStyle: "normal",
+                        letterSpacing: "-0.025em",
+                        lineHeight: 1.4,
+                        marginTop: "20px",
+                        padding: "0",
+                        whiteSpace: "pre-wrap",
+                        position: "absolute",
+                        top: "40%",
+                    }}
+                >
+                    <div style={{ marginBottom: "20px" }}>Welcome to UNDRGRND!</div>
+                    <div style={{ marginBottom: "20px" }}>Check your stats below 👇</div>
+                </div>
+                <div
+                    class="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "150px", display: "flex" }}
+                    />
+                </div>
+            </div>
+        ),
+        intents: [
+            <TextInput placeholder="FID, username, wallet, or ENS." />,
+            <Button>🔎</Button>,
+            <Button.AddCastAction action="/grnd-stats">Install GRND Stats</Button.AddCastAction>,
+            <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip</Button.Redirect>,
+        ],
+        title: "UNDRGRND Stats",
+    });
+});
+
 app.frame("/", onchainDataMiddleware, async function (c) {
     return c.res({
         action: "/stats",

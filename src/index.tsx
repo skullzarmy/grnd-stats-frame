@@ -1,226 +1,210 @@
-import { Button, Frog, TextInput } from "@airstack/frog";
-import {
-    onchainDataFrogMiddleware as onchainData,
-    TokenBlockchain,
-    getFarcasterUserERC20Balances,
-    FarcasterUserERC20BalancesInput,
-    FarcasterUserERC20BalancesOutput,
-    checkTokenHoldByFarcasterUser,
-    getFarcasterUserDetails,
-    searchFarcasterUsers,
-    fetchQuery,
-    fetchQueryWithPagination,
-} from "@airstack/frames";
+import { Button, Frog, TextInput, TokenBlockchain } from "@airstack/frog";
+import { onchainDataFrogMiddleware as onchainData, fetchQuery } from "@airstack/frames";
 import { devtools } from "frog/dev";
 import { serveStatic } from "frog/serve-static";
+import { parse } from "dotenv";
+import { DuneClient } from "@duneanalytics/client-sdk";
+import Fuse from "fuse.js";
+const DEBUG = process.env.DEBUG === "true";
+conLog("Debug mode:", DEBUG);
+const onchainDataMiddleware = onchainData({
+    env: "dev",
+    features: {
+        userDetails: {},
+    },
+});
 
-//
-// HELPER FUNCTIONS
-//
+const CURRENT_USER = process.env.CURRENT_USER;
+if (!CURRENT_USER) {
+    conErr("Current user is missing.");
+}
+const DUNE_API_KEY = process.env[`DUNE_API_KEY_${CURRENT_USER?.toUpperCase() ?? ""}`];
+const DUNE_QUERY_ID = process.env[`DUNE_QUERY_ID_${CURRENT_USER?.toUpperCase() ?? ""}`];
+if (!DUNE_API_KEY || !DUNE_QUERY_ID) {
+    conErr("Dune API key or query ID is missing.");
+}
+const duneClient = new DuneClient(DUNE_API_KEY ?? "");
 
-async function returnSnapshotDate(): Promise<string | null> {
-    const latestSnapshotDate = "6/25/24 12:00PST";
-    return latestSnapshotDate;
+type NSOPassHolder = {
+    fid: string;
+    fname: string;
+    verified_addresses: string[];
+    total_grnd_spent: number;
+};
+
+function conLog(...args: any[]) {
+    if (DEBUG) {
+        console.log(...args);
+    }
 }
 
-function normalizeAddress(address: string): string {
+function conErr(...args: any[]) {
+    if (DEBUG) {
+        console.error(...args);
+    }
+}
+
+// Fetch all NSO pass holder data from Dune
+async function fetchNSOPassHolders(): Promise<NSOPassHolder[]> {
+    try {
+        const queryResult = await duneClient.getLatestResult({ queryId: parseInt(DUNE_QUERY_ID ?? "") });
+        if (!queryResult || !queryResult.result) {
+            conErr("Query result is missing or invalid");
+            return [];
+        }
+
+        return queryResult.result.rows.map((row: any) => ({
+            fid: row.fid,
+            fname: row.fname,
+            verified_addresses: row.verified_addresses,
+            total_grnd_spent: row.total_grnd_spent,
+        }));
+    } catch (error) {
+        conErr("Error fetching NSO pass holders:", error);
+        return [];
+    }
+}
+
+async function fetchGRNDBalance(wallets: string[] | string): Promise<number> {
+    if (!wallets) {
+        conErr("No wallet addresses provided.");
+        return 0;
+    }
+    conLog("Wallets:", wallets);
+    const normalizedWallets = normalizeWallets(wallets);
+    if (normalizedWallets.length === 0) {
+        conErr("No valid wallet addresses found.");
+        return 0;
+    }
+    conLog("Normalized wallets:", normalizedWallets);
+
+    const walletList = normalizedWallets.map((wallet) => `"${wallet}"`).join(", ");
+    conLog("Normalized wallet list:", walletList);
+
+    const query = `query CheckTokenOwnership {
+        TokenBalances(
+          input: {
+            filter: {
+              tokenAddress: {_eq: "0xD94393cd7fCCeb749cD844E89167d4a2CDC64541"},
+              owner: {_in: [${walletList}]}
+            },
+            blockchain: base
+          }
+        ) {
+          TokenBalance {
+            formattedAmount
+          }
+        }
+    }`;
+
+    const { data, error } = await fetchQuery(query);
+    if (error) {
+        conErr("Error fetching GRND balance:", error);
+        return 0;
+    }
+    conLog("GRND Balance Data:", data);
+
+    const totalBalance = data?.TokenBalances?.TokenBalance.reduce(
+        (acc: number, token: any) => acc + parseFloat(token.formattedAmount),
+        0
+    );
+    conLog("Total GRND Balance:", totalBalance);
+    return totalBalance || 0;
+}
+
+// Normalize Ethereum address
+function normalizeAddress(address: string): string | null {
+    if (!address) return null;
+    if (!address.match(/^0x[a-fA-F0-9]{40}$/)) {
+        return null;
+    }
     return address.toLowerCase();
 }
 
-// Function to get FID from wallet address using Airstack
-async function getFidFromWallet(walletAddress: string): Promise<string | null> {
-    const normalizedAddress = normalizeAddress(walletAddress);
-    const { data, error } = await fetchQuery(/* GraphQL */ `
-        query GetFarcasterUserFromWallet {
-            Socials(
-                input: {
-                    filter: {
-                        userAssociatedAddresses: { _eq: "${normalizedAddress}" }
-                        dappName: { _eq: farcaster }
-                    }
-                    blockchain: ethereum
-                }
-            ) {
-                Social {
-                    userId
-                }
-            }
-        }
-    `);
-
-    if (error) throw new Error(error);
-
-    return data?.Socials?.Social[0]?.userId ?? null;
-}
-
-// Type definition for the GraphQL response
-type TokenBalance = {
-    owner: {
-        identity: string;
-    };
-    tokenAddress: string;
-    tokenId: string;
-    formattedAmount: number;
-};
-
-type TokenBalanceResponse = {
-    data?: {
-        TokenBalances?: {
-            TokenBalance?: TokenBalance[] | null;
-        } | null;
-    } | null;
-    error?: any;
-};
-
-// Function to check NSO token ownership
-async function checkTokenOwnership(fid: string, tokenAddress: string, tokenIds: string[]): Promise<boolean> {
-    try {
-        // Get all connected wallet addresses for the user
-        const userDetails = await getFarcasterUserDetails({ fid });
-        const connectedAddresses =
-            userDetails?.data?.connectedAddresses.map((addr) => normalizeAddress(addr.address)) || [];
-
-        if (connectedAddresses.length === 0) {
-            console.error("No connected addresses found for the user.");
-            return false;
-        }
-
-        const query = `
-            query CheckTokenOwnership($tokenAddress: Address!, $tokenIds: [String!], $owners: [Identity!]) {
-                TokenBalances(
-                    input: {
-                        filter: {
-                            tokenAddress: { _eq: $tokenAddress },
-                            tokenId: { _in: $tokenIds },
-                            owner: { _in: $owners }
-                        },
-                        blockchain: base,
-                        limit: 50
-                    }
-                ) {
-                    TokenBalance {
-                        owner {
-                            identity
-                        }
-                        tokenAddress
-                        tokenId
-                        formattedAmount
-                    }
-                    pageInfo {
-                        nextCursor
-                        prevCursor
-                    }
-                }
-            }
-        `;
-
-        const variables = {
-            tokenAddress,
-            tokenIds,
-            owners: connectedAddresses,
-        };
-
-        // console.log("Query Variables:", variables);
-
-        const response: TokenBalanceResponse = await fetchQuery(query, variables);
-
-        if (response.error) {
-            console.error("GraphQL errors:", response.error);
-            return false;
-        }
-
-        if (!response.data || !response.data.TokenBalances) {
-            console.error("Response data or TokenBalances is null or undefined", response);
-            return false;
-        }
-
-        const tokenBalances = response.data.TokenBalances.TokenBalance;
-
-        if (!tokenBalances || tokenBalances.length === 0) {
-            console.error("TokenBalance array is empty or undefined");
-            return false;
-        }
-
-        // console.log("Token Balances:", tokenBalances);
-
-        return tokenBalances.length > 0;
-    } catch (error) {
-        console.error("Error checking token ownership:", error);
-        return false;
-    }
-}
-
-// Function to get holder's data from external API
-async function getHolderData(walletAddresses: string[]) {
-    for (let walletAddress of walletAddresses) {
-        walletAddress = normalizeAddress(walletAddress);
+function normalizeWallets(wallets: string[] | string): string[] {
+    if (typeof wallets === "string") {
         try {
-            const url = "https://us-central1-poundprod.cloudfunctions.net/tstgrnd";
-            const response = await fetch(url, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ address: walletAddress }),
-            });
-            if (response.ok) {
-                const data = await response.json();
-                if (data.length > 0) {
-                    return data[0]; // Return the first valid data found
-                }
-            }
-        } catch (error) {
-            console.error(`Error fetching holder data for ${walletAddress}:`, error);
+            // Attempt to parse the string if it's a JSON stringified array
+            wallets = JSON.parse(wallets);
+        } catch {
+            // If parsing fails, assume it's a single address string
+            wallets = [wallets];
         }
     }
-    return null; // Return null if no data found for any address
+
+    // Remove duplicates and normalize all addresses
+    const uniqueWallets = Array.from(new Set(wallets));
+    return uniqueWallets.map(normalizeAddress).filter((address): address is string => address !== null);
 }
 
-// Helper function to get Farcaster user details by wallet address
-async function getUserDetailsByAddress(address: string) {
-    const normalizedAddress = normalizeAddress(address);
-    const fid = await getFidFromWallet(normalizedAddress);
-    if (fid) {
-        const userDetails = await getFarcasterUserDetails({ fid });
-        const profileImage = userDetails?.data?.profileImage?.extraSmall;
-        const profilePictureUrl = profileImage && profileImage.startsWith("http") ? profileImage : null;
-        return {
-            username: userDetails?.data?.profileName || null,
-            profilePictureUrl: profilePictureUrl || null,
-        };
+// Resolve user input to match against NSO pass holders
+async function resolveInput(inputText: string | number): Promise<NSOPassHolder | null> {
+    if (!inputText) {
+        conErr("No input text provided");
+        return null;
     }
-    return {
-        username: null,
-        profilePictureUrl: null,
+
+    conLog("Original input:", inputText);
+
+    const nsoPassHolders = await fetchNSOPassHolders();
+    if (nsoPassHolders.length === 0) {
+        conErr("No NSO pass holders found");
+        return null;
+    }
+
+    // Ensure input is treated as a string
+    let inputString = String(inputText).trim().toLowerCase();
+    conLog("Processed input as string:", inputString);
+
+    // Check if input is a numeric fid
+    if (/^\d+$/.test(inputString)) {
+        conLog("Input is recognized as a numeric FID:", inputString);
+        const fidMatch = nsoPassHolders.find((holder) => String(holder.fid) === inputString);
+        if (fidMatch) {
+            conLog("Matched by FID:", fidMatch);
+            return fidMatch;
+        } else {
+            conLog(`No match found for FID: ${inputString}`);
+            return null;
+        }
+    }
+
+    // Check if input is an Ethereum address
+    const normalizedAddress = normalizeAddress(inputString);
+    if (normalizedAddress) {
+        // conLog("Input is recognized as an Ethereum address:", normalizedAddress);
+        const addressMatch = nsoPassHolders.find((holder) => holder.verified_addresses.includes(normalizedAddress));
+        if (addressMatch) {
+            // conLog("Matched by Ethereum address:", addressMatch);
+            return addressMatch;
+        }
+    }
+
+    // Check if input is a direct match for fname
+    const directMatch = nsoPassHolders.find((holder) => holder.fname.toLowerCase() === inputString);
+    if (directMatch) {
+        // conLog("Matched by direct fname:", directMatch);
+        return directMatch;
+    }
+
+    // Fuzzy search by fname as a last resort
+    const options = {
+        keys: ["fname"],
+        threshold: 0.3, // Adjust threshold as needed
     };
-}
-
-// Function to resolve input to FID
-async function resolveInputToFID(inputText: string): Promise<string | null> {
-    if (!inputText) return null;
-
-    if (!isNaN(Number(inputText)) && !/^0x[a-fA-F0-9]{40}$/.test(inputText)) {
-        return inputText;
-    } else if (/^0x[a-fA-F0-9]{40}$/.test(inputText)) {
-        const normalizedAddress = normalizeAddress(inputText);
-        return await getFidFromWallet(normalizedAddress);
-    } else {
-        if (inputText.startsWith("@")) {
-            inputText = inputText.slice(1);
-        }
-        return await getFidFromUsername(inputText);
+    const fuse = new Fuse(nsoPassHolders, options);
+    const fuzzyResults = fuse.search(inputString);
+    if (fuzzyResults.length > 0) {
+        // conLog("Matched by fuzzy search:", fuzzyResults[0].item);
+        return fuzzyResults[0].item;
     }
-}
 
-// Function to get FID from Farcaster username using Airstack
-async function getFidFromUsername(username: string): Promise<string | null> {
-    const { data } = await searchFarcasterUsers({ profileName: username });
-    if (data && data.length > 0) {
-        return data.find((user) => user.profileName === username)?.fid ?? data[0].fid;
-    }
+    // No match found
+    // conLog("No match found for input:", inputString);
     return null;
 }
 
+// Format number with K, M, B, T suffixes
 function formatNumber(num: number): string {
     if (num >= 1_000_000_000_000) {
         return (num / 1_000_000_000_000).toFixed(2) + "T";
@@ -234,38 +218,106 @@ function formatNumber(num: number): string {
     return num.toLocaleString();
 }
 
-// Function to get the top 10 list
-async function getTop10List(): Promise<any[]> {
-    try {
-        const url = "https://us-central1-poundprod.cloudfunctions.net/tstgrnd-top10";
-        const response = await fetch(url);
-        if (response.ok) {
-            const data = await response.json();
-            return data;
-        }
-    } catch (error) {
-        console.error("Error fetching top 10 list:", error);
-    }
-    return [];
+async function returnSnapshotDate(): Promise<string | null> {
+    return "Updated every 6h";
 }
 
-//
-// MAIN APP
-//
+function renderNotFoundScreen(c: any, customFID: string | null, debug: boolean = false) {
+    if (debug) {
+        conLog("Entering renderNotFoundScreen");
+        conLog("Custom FID:", customFID);
+    }
 
-const onchainDataMiddleware = onchainData({
-    env: "dev",
-    features: {
-        userDetails: {},
-        erc20Balances: {
-            chains: [TokenBlockchain.Base],
-            limit: 100,
-        },
-    },
-});
+    if (debug) conErr("User not found or invalid FID:", customFID);
+
+    const response = c.res({
+        action: "/stats",
+        image: (
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    background: "black",
+                    backgroundSize: "100% 100%",
+                    height: "100%",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    width: "100%",
+                    padding: "20px",
+                    borderRadius: "15px",
+                    boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
+                }}
+            >
+                <img
+                    src="https://grnd-stats.fly.dev/logo.png"
+                    alt="UNDRGRND logo"
+                    style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.15 }}
+                />
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        color: "#FF2222",
+                        backgroundColor: "rgba(0, 0, 0, 0.75)",
+                        borderRadius: "15px",
+                        border: "5px dashed #AA0000",
+                        fontWeight: "bold",
+                        fontSize: "1.5em",
+                        fontStyle: "normal",
+                        letterSpacing: "-0.025em",
+                        lineHeight: 1.4,
+                        marginTop: "20px",
+                        padding: "5px 20px",
+                        whiteSpace: "pre-wrap",
+                        position: "absolute",
+                        top: "20%",
+                    }}
+                >
+                    <div style={{ marginBottom: "5px", fontSize: "6em" }}>🚫</div>
+                    <div style={{ marginBottom: "20px", display: "flex" }}>
+                        USER/FID {customFID ? `'${customFID}'` : ""} NOT FOUND 😢
+                    </div>
+                    <div style={{ marginBottom: "20px" }}>THIS USER IS NOT A PASSHOLDER OR WAS NOT FOUND.</div>
+                </div>
+                <div
+                    className="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "75px", display: "flex" }}
+                    />
+                </div>
+            </div>
+        ),
+        intents: [
+            <TextInput placeholder="FID, username, or wallet." />,
+            <Button>🔎</Button>,
+            <Button action="/approve-grnd">Mint NSO v2</Button>,
+        ],
+        title: "UNDRGRND Stats",
+    });
+
+    if (debug) conLog("Rendered not found screen response:", response);
+
+    return response;
+}
 
 export const app = new Frog({
     apiKey: process.env.AIRSTACK_API_KEY as string,
+    headers: {
+        "cache-control": "max-age=0",
+    },
     imageAspectRatio: "1:1",
     hub: {
         apiUrl: "https://hubs.airstack.xyz",
@@ -278,9 +330,6 @@ export const app = new Frog({
     browserLocation: "/browser.html",
 });
 
-//
-// Cast actions
-//
 app.castAction(
     "/grnd-stats",
     (c) => {
@@ -294,6 +343,79 @@ app.castAction(
         icon: "graph",
     }
 );
+
+app.frame("/cast-actions", async function (c) {
+    return c.res({
+        action: "/stats",
+        image: (
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    background: "black",
+                    backgroundSize: "100% 100%",
+                    height: "100%",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    width: "100%",
+                    padding: "20px",
+                    borderRadius: "15px",
+                    boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
+                }}
+            >
+                <img
+                    src="https://grnd-stats.fly.dev/logo.png"
+                    alt="UNDRGRND logo"
+                    style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
+                />
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        color: "white",
+                        fontSize: "1.5em",
+                        fontStyle: "normal",
+                        letterSpacing: "-0.025em",
+                        lineHeight: 1.4,
+                        marginTop: "20px",
+                        padding: "0",
+                        whiteSpace: "pre-wrap",
+                        position: "absolute",
+                        top: "40%",
+                    }}
+                >
+                    <div style={{ marginBottom: "20px" }}>GRND Cast Actions</div>
+                    <div style={{ marginBottom: "20px" }}>👇 Install Below 👇</div>
+                </div>
+                <div
+                    className="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "75px", display: "flex" }}
+                    />
+                </div>
+            </div>
+        ),
+        intents: [
+            <Button.AddCastAction action="/grnd-stats">GRND Stats</Button.AddCastAction>,
+            <Button.AddCastAction action="/top-ten-action">Top 10 SNDRs</Button.AddCastAction>,
+            <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip Jar</Button.Redirect>,
+        ],
+        title: "GRND Cast Actions",
+    });
+});
 
 app.frame("/cast-action", onchainDataMiddleware, async function (c) {
     return c.res({
@@ -341,7 +463,7 @@ app.frame("/cast-action", onchainDataMiddleware, async function (c) {
                     <div style={{ marginBottom: "20px" }}>👇 Install Below 👇</div>
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         display: "flex",
                         backgroundColor: "white",
@@ -354,7 +476,7 @@ app.frame("/cast-action", onchainDataMiddleware, async function (c) {
                     <img
                         src="https://grnd-stats.fly.dev/skllzrmy.png"
                         alt="skllzrmys logo"
-                        style={{ width: "150px", display: "flex" }}
+                        style={{ width: "75px", display: "flex" }}
                     />
                 </div>
             </div>
@@ -368,21 +490,6 @@ app.frame("/cast-action", onchainDataMiddleware, async function (c) {
     });
 });
 
-// New cast action for top 10 frame
-app.castAction(
-    "/top-ten-action",
-    (c) => {
-        return c.res({ type: "frame", path: "/top" });
-    },
-    {
-        name: "Top 10 GRND SNDRs",
-        icon: "list-ordered",
-    }
-);
-
-//
-// Frames Endpoints
-//
 app.frame("/", onchainDataMiddleware, async (c) => {
     return c.res({
         action: "/stats",
@@ -422,14 +529,15 @@ app.frame("/", onchainDataMiddleware, async (c) => {
                         padding: "0",
                         whiteSpace: "pre-wrap",
                         position: "absolute",
-                        top: "40%",
+                        top: "30%",
                     }}
                 >
                     <div style={{ marginBottom: "20px" }}>Welcome to UNDRGRND!</div>
-                    <div style={{ marginBottom: "20px" }}>Check your stats below 👇</div>
+                    <div style={{ marginBottom: "20px" }}>Check your stats</div>
+                    <div style={{ marginBottom: "20px" }}>and mint your pass below 👇</div>
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         display: "flex",
                         backgroundColor: "white",
@@ -442,14 +550,15 @@ app.frame("/", onchainDataMiddleware, async (c) => {
                     <img
                         src="https://grnd-stats.fly.dev/skllzrmy.png"
                         alt="skllzrmys logo"
-                        style={{ width: "150px", display: "flex" }}
+                        style={{ width: "75px", display: "flex" }}
                     />
                 </div>
             </div>
         ),
         intents: [
-            <TextInput placeholder="FID, username, wallet, or ENS." />,
+            <TextInput placeholder="FID, username, or wallet." />,
             <Button>🔎</Button>,
+            <Button action="/approve-grnd">Mint NSO v2</Button>,
             <Button.Redirect location="https://warpcast.com/skllzrmy/0x30ecd6ff">Tip</Button.Redirect>,
         ],
         title: "UNDRGRND Stats",
@@ -458,114 +567,41 @@ app.frame("/", onchainDataMiddleware, async (c) => {
 
 app.frame("/stats/:inputText?", onchainDataMiddleware, async (c) => {
     const { inputText, frameData } = c;
-    const { castId, fid, messageHash, network, timestamp, url } = frameData;
+    const { fid } = frameData;
+    const initialFID = parseInt(fid);
     const urlParamInputText = c.req.param("inputText");
-    let customFID = inputText || urlParamInputText || fid || null;
 
-    if (inputText) {
-        customFID = await resolveInputToFID(inputText);
-    } else if (urlParamInputText) {
-        customFID = await resolveInputToFID(urlParamInputText);
+    // Prioritize the inputs as: URL param -> manually typed input -> FID from frameData
+    const customFID = (urlParamInputText as string) || (inputText as string) || (initialFID as string) || null;
+
+    conLog("URL Param Input:", urlParamInputText);
+    conLog("Manually Typed Input:", inputText);
+    conLog("FID from frameData:", initialFID);
+    conLog("Custom FID to resolve:", customFID);
+
+    let nsoPassHolder = null;
+    if (customFID) {
+        nsoPassHolder = await resolveInput(customFID);
+        conLog("Resolved NSO Pass Holder:", nsoPassHolder);
+    }
+    conLog("NSO Pass Holder:", nsoPassHolder);
+    if (!nsoPassHolder) {
+        return renderNotFoundScreen(c, customFID, true); // Toggle debugging by setting the third parameter
     }
 
-    if (!customFID) {
-        return c.res({
-            action: "/stats",
-            image: (
-                <div
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        background: "black",
-                        backgroundSize: "100% 100%",
-                        height: "100%",
-                        justifyContent: "center",
-                        textAlign: "center",
-                        width: "100%",
-                        padding: "20px",
-                        borderRadius: "15px",
-                        boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
-                    }}
-                >
-                    <img
-                        src="https://grnd-stats.fly.dev/logo.png"
-                        alt="UNDRGRND logo"
-                        style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
-                    />
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            alignItems: "center",
-                            color: "#FF2222",
-                            backgroundColor: "rgba(0, 0, 0, 0.75)",
-                            borderRadius: "15px",
-                            border: "5px dashed #AA0000",
-                            fontWeight: "bold",
-                            fontSize: "1.5em",
-                            fontStyle: "normal",
-                            letterSpacing: "-0.025em",
-                            lineHeight: 1.4,
-                            marginTop: "20px",
-                            padding: "5px 20px",
-                            whiteSpace: "pre-wrap",
-                            position: "absolute",
-                            top: "20%",
-                        }}
-                    >
-                        <div style={{ marginBottom: "5px", fontSize: "6em" }}>🚫</div>
-                        <div style={{ marginBottom: "20px", display: "flex" }}>
-                            USER {inputText ? `'${inputText}'` : urlParamInputText ? `'${urlParamInputText}'` : ""} NOT
-                            FOUND 😢
-                        </div>
-                        <div style={{ marginBottom: "20px" }}>PLEASE TRY ANOTHER INPUT</div>
-                    </div>
-                    <div
-                        class="footer"
-                        style={{
-                            display: "flex",
-                            backgroundColor: "white",
-                            padding: "10px",
-                            margin: "15px auto",
-                            borderRadius: "15px",
-                            border: "2px dashed #000",
-                        }}
-                    >
-                        <img
-                            src="https://grnd-stats.fly.dev/skllzrmy.png"
-                            alt="skllzrmys logo"
-                            style={{ width: "150px", display: "flex" }}
-                        />
-                    </div>
-                </div>
-            ),
-            intents: [
-                <TextInput placeholder="FID, username, wallet, or ENS." />,
-                <Button>🔎</Button>,
-                <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
-                    Get Pass
-                </Button.Redirect>,
-                <Button.Redirect location={`https://undrgrnd.io/claim`}>Claim</Button.Redirect>,
-                <Button.Redirect location="https://warpcast.com/~/compose?Check%20your%20GRND%20stats%20in%20frame%21%20by%20%40skllzrmy&embeds[]=https://grnd-stats.fly.dev">
-                    Share
-                </Button.Redirect>,
-            ],
-            title: "UNDRGRND Stats",
-        });
-    }
+    conLog("Rendering NSO Pass Holder Data:", nsoPassHolder);
 
     return c.res({
-        image: `/img/stat/${customFID}`,
+        action: "/stats",
+        image: `/img/stat/${nsoPassHolder.fid}`,
         intents: [
-            <TextInput placeholder="FID, username, wallet, or ENS." />,
+            <TextInput placeholder="FID, username, or wallet." />,
             <Button>🔎</Button>,
-            <Button.Redirect location="https://zora.co/collect/base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
-                Get Pass
-            </Button.Redirect>,
-            <Button.Redirect location={`https://undrgrnd.io/claim`}>Claim</Button.Redirect>,
+            <Button action="/approve-grnd">Mint NSO v2</Button>,
             <Button.Redirect
-                location={`https://warpcast.com/~/compose?text=Check%20your%20GRND%20stats%20in%20frame%21%20by%20%40skllzrmy&embeds[]=https://grnd-stats.fly.dev/img/stat/${customFID}&embeds[]=https://grnd-stats.fly.dev/`}
+                location={`https://warpcast.com/~/compose?text=Check%20your%20GRND%20stats%20in%20frame%21%20by%20%40skllzrmy&embeds[]=https://grnd-stats.fly.dev/img/stat/${
+                    nsoPassHolder.fid
+                }/${new Date().getTime()}&embeds[]=https://grnd-stats.fly.dev/`}
             >
                 Share
             </Button.Redirect>,
@@ -574,129 +610,46 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async (c) => {
     });
 });
 
-app.image("/img/stat/:fid", async (c) => {
+app.image("/img/stat/:fid/:timestamp?", async (c) => {
     const { fid } = c.req.param();
-    if (isNaN(parseInt(fid, 10))) {
-        return c.res({
-            image: (
-                <div
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        background: "black",
-                        backgroundSize: "100% 100%",
-                        height: "100%",
-                        justifyContent: "center",
-                        textAlign: "center",
-                        width: "100%",
-                        padding: "20px",
-                        borderRadius: "15px",
-                        boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
-                    }}
-                >
-                    <img
-                        src="https://grnd-stats.fly.dev/logo.png"
-                        alt="UNDRGRND logo"
-                        style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
-                    />
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            alignItems: "center",
-                            color: "#FF2222",
-                            backgroundColor: "rgba(0, 0, 0, 0.75)",
-                            borderRadius: "15px",
-                            border: "5px dashed #AA0000",
-                            fontWeight: "bold",
-                            fontSize: "1.5em",
-                            fontStyle: "normal",
-                            letterSpacing: "-0.025em",
-                            lineHeight: 1.4,
-                            marginTop: "20px",
-                            padding: "5px 20px",
-                            whiteSpace: "pre-wrap",
-                            position: "absolute",
-                            top: "20%",
-                        }}
-                    >
-                        <div style={{ marginBottom: "5px", fontSize: "6em" }}>🚫</div>
-                        <div style={{ marginBottom: "20px", display: "flex" }}>USER '{fid}' NOT FOUND 😢</div>
-                        <div style={{ marginBottom: "20px" }}>PLEASE TRY ANOTHER INPUT (FID)</div>
-                    </div>
-                    <div
-                        class="footer"
-                        style={{
-                            display: "flex",
-                            backgroundColor: "white",
-                            padding: "10px",
-                            margin: "15px auto",
-                            borderRadius: "15px",
-                            border: "2px dashed #000",
-                        }}
-                    >
-                        <img
-                            src="https://grnd-stats.fly.dev/skllzrmy.png"
-                            alt="skllzrmys logo"
-                            style={{ width: "150px", display: "flex" }}
-                        />
-                    </div>
-                </div>
-            ),
-            intents: [
-                <TextInput placeholder="FID, username, wallet, or ENS." />,
-                <Button>🔎</Button>,
-                <Button.Redirect location="base:0xa08a01b9a890e9ad5c26f7257e3558d256df8059/2">
-                    Get Pass
-                </Button.Redirect>,
-                <Button.Redirect location={`https://undrgrnd.io/claim`}>Claim</Button.Redirect>,
-                <Button.Redirect location="https://warpcast.com/~/compose?Check%20your%20GRND%20stats%20in%20frame%21%20by%20%40skllzrmy&embeds[]=https://grnd-stats.fly.dev">
-                    Share
-                </Button.Redirect>,
-            ],
-            title: "UNDRGRND Stats",
-        });
+    const parsedFID = parseInt(fid, 10);
+    conLog("Parsed FID:", parsedFID);
+    conLog("isNaN:", isNaN(parsedFID));
+    if (isNaN(parsedFID)) {
+        return renderNotFoundScreen(c, parsedFID.toString(), true); // Toggle debugging by setting the third parameter
     }
 
-    const userDetails = await getFarcasterUserDetails({ fid });
-    const connectedAddresses =
-        userDetails?.data?.connectedAddresses.map((addr) => normalizeAddress(addr.address)) || [];
+    const nsoPassHolders = await fetchNSOPassHolders();
+    const nsoPassHolder = nsoPassHolders.find((holder) => parseInt(holder.fid, 10) === parsedFID);
+    conLog("NSO Pass Holder:", !!nsoPassHolder);
+    if (!nsoPassHolder) {
+        return renderNotFoundScreen(c, parsedFID.toString(), true); // Toggle debugging by setting the third parameter
+    }
+    // Fetch the GRND balance for the verified addresses of the NSO pass holder
+    const grndBalance = await fetchGRNDBalance(nsoPassHolder.verified_addresses);
 
-    const holderData = await getHolderData(connectedAddresses);
-    const grndInput: FarcasterUserERC20BalancesInput = {
-        fid: parseInt(fid, 10),
-        chains: [TokenBlockchain.Base],
-        limit: 100,
-    };
-    const { data, error }: FarcasterUserERC20BalancesOutput = await getFarcasterUserERC20Balances(grndInput);
-    const grndBalance = data
-        ?.filter((d) => normalizeAddress(d?.tokenAddress) === "0xd94393cd7fcceb749cd844e89167d4a2cdc64541")
-        .reduce((total, current) => total + (current?.amount || 0), 0);
-
-    const tokenAddress = "0xa08a01b9a890e9ad5c26f7257e3558d256df8059";
-    const tokenIds = ["1", "2"];
-    const ssnPassMinted = await checkTokenOwnership(fid, tokenAddress, tokenIds);
-    // console.log("SSN Pass Minted:", ssnPassMinted);
-    const profileName = userDetails?.data?.profileName;
-    const passHolderColor = ssnPassMinted ? "green" : "red";
-    const safeProfileImageUrl = userDetails?.data?.profileImage?.extraSmall ?? null;
+    const profileName = nsoPassHolder.fname;
+    const passHolderColor = nsoPassHolder ? "green" : "red";
     const latestSnapshotDate = await returnSnapshotDate();
 
-    let grndSent = 0;
-    let txnCount = 0;
-    let currentMultiplier = "1X";
-    let percentOfGoal = 0;
+    let grndSent = nsoPassHolder.total_grnd_spent;
+    let currentMultiplier = "0";
+    let holderMultiplier = "5x";
+    let percentOfGoal = (grndSent / 30_000_000) * 100;
+    // Final debug log before rendering the UI
+    conLog("Final rendering data:", {
+        nsoPassHolder,
+        grndBalance,
+        inputUsed: fid,
+        fallbackTriggered: !nsoPassHolder,
+    });
 
-    if (holderData) {
-        grndSent = holderData.GRND_Sent ?? 0;
-        txnCount = holderData.Txn_Count ?? 0;
-        percentOfGoal = (grndSent / 15_000_000) * 100;
-        if (grndSent >= 15_000_000) {
-            currentMultiplier = "10X";
-        }
+    // Ensure that no incorrect fallback rendering is happening
+    if (!nsoPassHolder) {
+        conErr("Fallback triggered when it shouldn't be.");
+    } else {
+        conLog("Fallback check not triggered.");
     }
-
     return c.res({
         image: (
             <div
@@ -730,20 +683,13 @@ app.image("/img/stat/:fid", async (c) => {
                         fontStyle: "normal",
                         letterSpacing: "-0.025em",
                         lineHeight: 1.4,
-                        top: "10px",
+                        top: "15px",
                         padding: "0",
                         whiteSpace: "pre-wrap",
                         position: "absolute",
                     }}
                 >
                     <div style={{ marginBottom: "5px", display: "flex", alignItems: "center" }}>
-                        {safeProfileImageUrl && (
-                            <img
-                                src={safeProfileImageUrl}
-                                alt={`${profileName}'s profile`}
-                                style={{ borderRadius: "50%", width: "50px", height: "50px", marginRight: "10px" }}
-                            />
-                        )}
                         <h2>{`@${profileName}`}</h2>
                     </div>
 
@@ -762,7 +708,7 @@ app.image("/img/stat/:fid", async (c) => {
                                 color: passHolderColor,
                             }}
                         >
-                            <strong>Never Sellout Vol.01:</strong> {ssnPassMinted ? "HODLR 💎🤲" : "👎🚫😢"}
+                            <strong>Never Sellout Vol.02:</strong> {nsoPassHolder ? "HODLR 💎🤲" : "👎🚫😢"}
                         </div>
                         <div
                             style={{
@@ -778,25 +724,8 @@ app.image("/img/stat/:fid", async (c) => {
                                 color: "white",
                             }}
                         >
-                            <strong>GRND Sent:</strong>{" "}
-                            {grndSent ? formatNumber(parseInt(grndSent, 10)) : ssnPassMinted ? "0" : "🚫"}
-                        </div>
-                        <div
-                            style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                margin: "2px 0",
-                                padding: "0px",
-                                backgroundColor: "transparent",
-                                borderRadius: "8px",
-                                width: "100%",
-                                textAlign: "left",
-                                fontWeight: "800",
-                                color: "white",
-                            }}
-                        >
-                            <strong>Txns Counted:</strong>{" "}
-                            {txnCount ? formatNumber(txnCount) : ssnPassMinted ? "0" : "🚫"}
+                            <strong>GRND Spent:</strong>{" "}
+                            {grndSent ? formatNumber(parseInt(grndSent.toString(), 10)) : nsoPassHolder ? "0" : "🚫"}
                         </div>
                         <div
                             style={{
@@ -818,10 +747,10 @@ app.image("/img/stat/:fid", async (c) => {
                                     fontSize: "1em",
                                     fontWeight: "bold",
                                     align: "text-baseline",
-                                    color: grndSent >= 15_000_000 ? "green" : "white",
+                                    color: nsoPassHolder ? "green" : "white",
                                 }}
                             >
-                                {ssnPassMinted ? currentMultiplier : "🚫"}
+                                {nsoPassHolder ? holderMultiplier : "🚫"}
                             </span>
                         </div>
                         <div
@@ -838,20 +767,16 @@ app.image("/img/stat/:fid", async (c) => {
                                 color: "white",
                             }}
                         >
-                            <strong>July Refund:</strong>
+                            <strong>S2 Refund:</strong>
                             <span
                                 style={{
                                     fontSize: "1em",
                                     fontWeight: "bold",
-                                    align: "text-baseline",
-                                    color: grndSent >= 15_000_000 ? "green" : "white",
+                                    verticalAlign: "text-baseline",
+                                    color: nsoPassHolder ? "green" : "white",
                                 }}
                             >
-                                {ssnPassMinted
-                                    ? grndSent >= 15_000_000
-                                        ? "150M (max)"
-                                        : formatNumber(grndSent)
-                                    : "🚫"}
+                                {nsoPassHolder ? formatNumber(Math.min(grndSent * 5, 150000000)) : "🚫"}
                             </span>
                         </div>
                         <div
@@ -868,37 +793,39 @@ app.image("/img/stat/:fid", async (c) => {
                                 color: "white",
                             }}
                         >
-                            <strong>% of Goal:</strong>
+                            <strong>% of Max Refund:</strong>
                             <span
                                 style={{
                                     fontSize: "1em",
                                     fontWeight: "bold",
-                                    align: "text-baseline",
-                                    color: grndSent >= 15_000_000 ? "green" : "white",
+                                    verticalAlign: "text-baseline",
+                                    color: nsoPassHolder ? "green" : "white",
                                 }}
                             >
-                                {ssnPassMinted ? percentOfGoal.toFixed(2) + "%" : "🚫"}
+                                {nsoPassHolder ? Math.min(parseFloat(percentOfGoal.toFixed(2)), 100) + "%" : "🚫"}
                             </span>
                         </div>
                         <div
                             style={{
                                 display: "flex",
                                 justifyContent: "space-between",
-                                margin: "15px 0",
-                                padding: "10px",
-                                backgroundColor: "#00000066",
+                                margin: "2px 0",
+                                padding: "0px",
+                                backgroundColor: "transparent",
                                 borderRadius: "8px",
-                                border: "2px dashed #fff",
                                 width: "100%",
                                 textAlign: "left",
+                                fontWeight: "800",
+                                color: "white",
                             }}
                         >
-                            <strong>$GRND Balance:</strong> {grndBalance ? grndBalance.toLocaleString() : "0"}
+                            <strong>GRND Balance:</strong>{" "}
+                            {grndBalance ? formatNumber(parseInt(grndBalance.toString(), 10)) : "🚫"}
                         </div>
                     </div>
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         position: "absolute",
                         display: "flex",
@@ -911,12 +838,12 @@ app.image("/img/stat/:fid", async (c) => {
                     Snapshot: {latestSnapshotDate}
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         display: "flex",
                         backgroundColor: "white",
                         padding: "10px",
-                        margin: "15px auto",
+                        margin: "0px auto",
                         borderRadius: "15px",
                         border: "2px dashed #000",
                     }}
@@ -924,11 +851,11 @@ app.image("/img/stat/:fid", async (c) => {
                     <img
                         src="https://grnd-stats.fly.dev/skllzrmy.png"
                         alt="skllzrmys logo"
-                        style={{ width: "150px", display: "flex" }}
+                        style={{ width: "75px", display: "flex" }}
                     />
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         position: "absolute",
                         display: "flex",
@@ -938,7 +865,7 @@ app.image("/img/stat/:fid", async (c) => {
                         fontSize: "0.8em",
                     }}
                 >
-                    snapshot updated every ~48hrs
+                    Season 2: Aug 2024
                 </div>
             </div>
         ),
@@ -948,35 +875,24 @@ app.image("/img/stat/:fid", async (c) => {
     });
 });
 
-// New frame endpoint for top 10
 app.frame("/top", onchainDataMiddleware, async (c) => {
     return c.res({
         action: "/top",
-        image: "/img/top",
+        image: `/img/top/${new Date().getTime()}`,
         intents: [
             <Button.Redirect location="https://warpcast.com/~/compose?embeds[]=https://grnd-stats.fly.dev/top">
                 Share
             </Button.Redirect>,
+            <Button action="/approve-grnd">Mint NSO v2</Button>,
         ],
         title: "Top 10 List",
     });
 });
 
-// Image endpoint for top 10
-app.image("/img/top", async (c) => {
-    const top10List = await getTop10List();
+app.image("/img/top/:timestamp?", async (c) => {
+    const nsoPassHolders = await fetchNSOPassHolders();
+    const top10List = nsoPassHolders.sort((a, b) => b.total_grnd_spent - a.total_grnd_spent).slice(0, 10);
     const latestSnapshotDate = await returnSnapshotDate();
-
-    // Get additional details for each entry
-    const top10Details = await Promise.all(
-        top10List.map(async (item) => {
-            const userDetails = await getUserDetailsByAddress(item.address);
-            return {
-                ...item,
-                ...userDetails,
-            };
-        })
-    );
 
     return c.res({
         image: (
@@ -1025,7 +941,10 @@ app.image("/img/top", async (c) => {
                         top: "5%",
                     }}
                 >
-                    <div style={{ marginBottom: "40px", fontSize: "1.9em" }}>GRND SNDR TOP 10</div>
+                    <div style={{ marginBottom: "40px", fontSize: "1.9em", display: "flex" }}>
+                        <span style={{ fontSize: "0.7em", lineHeight: "1.9em" }}>🔳 top 10</span> GRND SPNDRs{" "}
+                        <span style={{ fontSize: "0.65em", lineHeight: "1.9em" }}>ssn 2 🔳</span>
+                    </div>
                 </div>
                 <div
                     style={{
@@ -1035,7 +954,7 @@ app.image("/img/top", async (c) => {
                         gap: "5px",
                         alignItems: "center",
                         color: "white",
-                        fontSize: "0.9em", // Smaller font size
+                        fontSize: "0.9em",
                         fontStyle: "normal",
                         letterSpacing: "-0.025em",
                         lineHeight: 1.4,
@@ -1045,15 +964,15 @@ app.image("/img/top", async (c) => {
                         width: "60%",
                     }}
                 >
-                    {top10Details.map((item, index) => (
+                    {top10List.map((item, index) => (
                         <div
                             key={index}
                             style={{
                                 display: "flex",
                                 flexDirection: "row",
                                 alignItems: "center",
-                                width: "30%", // Adjusted width to fit better
-                                padding: "0.5% 1.5%", // Adjusted padding to fit better
+                                width: "30%",
+                                padding: "0.5% 1.5%",
                                 margin: "0px auto",
                                 textAlign: "center",
                                 borderBottom: "2px dashed white",
@@ -1070,45 +989,23 @@ app.image("/img/top", async (c) => {
                             >
                                 {index + 1}
                             </span>{" "}
-                            {/* Slightly smaller font size */}
-                            {item.profilePictureUrl ? (
-                                <img
-                                    src={item.profilePictureUrl}
-                                    alt={`${item.username || item.address.slice(0, 5)}...${item.address.slice(-5)}`}
-                                    style={{
-                                        borderRadius: "50%",
-                                        width: "40px", // Smaller image size
-                                        height: "40px",
-                                        marginBottom: "10px",
-                                        align: "text-middle",
-                                        marginRight: "5px",
-                                    }}
-                                />
-                            ) : (
-                                <div
-                                    style={{
-                                        width: "40px", // Smaller placeholder size
-                                        height: "40px",
-                                        borderRadius: "50%",
-                                        backgroundColor: "gray",
-                                        marginBottom: "10px",
-                                        align: "text-middle",
-                                        marginRight: "5px",
-                                    }}
-                                />
-                            )}
                             <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
                                 <span style={{ fontSize: "1.25em", fontWeight: "800" }}>
-                                    {item.username || `${item.address.slice(0, 5)}...${item.address.slice(-5)}`}
+                                    {item.fname === "N/A"
+                                        ? JSON.parse(item.verified_addresses)[0].length > 7
+                                            ? `${JSON.parse(item.verified_addresses)[0].slice(0, 3)}...${JSON.parse(
+                                                  item.verified_addresses
+                                              )[0].slice(-4)}`
+                                            : JSON.parse(item.verified_addresses)[0]
+                                        : item.fname}
                                 </span>
-                                <span style={{ fontSize: "1.25em" }}>{formatNumber(item.GRND_Sent)}</span>{" "}
-                                {/* Smaller font size */}
+                                <span style={{ fontSize: "1.25em" }}> {formatNumber(item.total_grnd_spent)}</span>
                             </div>
                         </div>
                     ))}
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         position: "absolute",
                         display: "flex",
@@ -1121,7 +1018,7 @@ app.image("/img/top", async (c) => {
                     Snapshot: {latestSnapshotDate}
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         display: "flex",
                         backgroundColor: "white",
@@ -1136,11 +1033,11 @@ app.image("/img/top", async (c) => {
                     <img
                         src="https://grnd-stats.fly.dev/skllzrmy.png"
                         alt="skllzrmys logo"
-                        style={{ width: "150px", display: "flex" }}
+                        style={{ width: "75px", display: "flex" }}
                     />
                 </div>
                 <div
-                    class="footer"
+                    className="footer"
                     style={{
                         position: "absolute",
                         display: "flex",
@@ -1150,7 +1047,7 @@ app.image("/img/top", async (c) => {
                         fontSize: "0.8em",
                     }}
                 >
-                    snapshot updated every ~48hrs
+                    Season 2: Aug 2024
                 </div>
             </div>
         ),
@@ -1158,6 +1055,409 @@ app.image("/img/top", async (c) => {
             "Cache-Control": "max-age=1800",
         },
     });
+});
+
+app.frame("/nso", onchainDataMiddleware, async (c) => {
+    return c.res({
+        action: "/mint-nso",
+        image: (
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    background: "black",
+                    backgroundSize: "100% 100%",
+                    height: "100%",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    width: "100%",
+                    padding: "20px",
+                    borderRadius: "15px",
+                    boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
+                }}
+            >
+                <img
+                    src="https://grnd-stats.fly.dev/logo.png"
+                    alt="UNDRGRND logo"
+                    style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
+                />
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        color: "white",
+                        fontSize: "1.5em",
+                        fontStyle: "normal",
+                        letterSpacing: "-0.025em",
+                        lineHeight: "1.9em",
+                        marginTop: "20px",
+                        padding: "0",
+                        whiteSpace: "pre-wrap",
+                        position: "absolute",
+                        top: "5%",
+                        left: "0",
+                        right: "0",
+                        bottom: "35%",
+                    }}
+                >
+                    <img
+                        src="/nsov2.png"
+                        alt="NSO v2"
+                        style={{ width: "450px", height: "80%", objectFit: "contain" }}
+                    />
+                    <div style={{ marginBottom: "20px" }}>Approve 10M GRND</div>
+                    <div style={{ marginBottom: "20px" }}>to mint your NSO v2</div>
+                    <div style={{ fontSize: ".5em", fontStyle: "italic" }}>photo by @jacque - styled by @uzzy</div>
+                </div>
+                <div
+                    className="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "75px", display: "flex" }}
+                    />
+                </div>
+            </div>
+        ),
+        intents: [<Button.Transaction target="/approve">Approve GRND</Button.Transaction>],
+        title: "Mint Never Sellout Vol.02",
+    });
+});
+
+app.frame("/approve-grnd", onchainDataMiddleware, async (c) => {
+    return c.res({
+        action: "/mint-nso",
+        image: (
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    background: "black",
+                    backgroundSize: "100% 100%",
+                    height: "100%",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    width: "100%",
+                    padding: "20px",
+                    borderRadius: "15px",
+                    boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
+                }}
+            >
+                <img
+                    src="https://grnd-stats.fly.dev/logo.png"
+                    alt="UNDRGRND logo"
+                    style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
+                />
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        color: "white",
+                        fontSize: "1.5em",
+                        fontStyle: "normal",
+                        letterSpacing: "-0.025em",
+                        lineHeight: "1.9em",
+                        marginTop: "20px",
+                        padding: "0",
+                        whiteSpace: "pre-wrap",
+                        position: "absolute",
+                        top: "5%",
+                        left: "0",
+                        right: "0",
+                        bottom: "35%",
+                    }}
+                >
+                    <img
+                        src="/nsov2.png"
+                        alt="NSO v2"
+                        style={{ width: "450px", height: "80%", objectFit: "contain" }}
+                    />
+                    <div style={{ marginBottom: "20px" }}>Approve 10M GRND</div>
+                    <div style={{ marginBottom: "20px" }}>to mint your NSO v2</div>
+                    <div style={{ fontSize: ".5em", fontStyle: "italic" }}>photo by @jacque - styled by @uzzy</div>
+                </div>
+                <div
+                    className="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "75px", display: "flex" }}
+                    />
+                </div>
+            </div>
+        ),
+        intents: [<Button.Transaction target="/approve">Approve GRND</Button.Transaction>],
+        title: "Approve GRND",
+    });
+});
+
+app.frame("/mint-nso", onchainDataMiddleware, async (c) => {
+    return c.res({
+        action: "/success",
+        image: (
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    background: "black",
+                    backgroundSize: "100% 100%",
+                    height: "100%",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    width: "100%",
+                    padding: "20px",
+                    borderRadius: "15px",
+                    boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
+                }}
+            >
+                <img
+                    src="https://grnd-stats.fly.dev/logo.png"
+                    alt="UNDRGRND logo"
+                    style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
+                />
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        color: "white",
+                        fontSize: "1.5em",
+                        fontStyle: "normal",
+                        letterSpacing: "-0.025em",
+                        lineHeight: "1.9em",
+                        marginTop: "20px",
+                        padding: "0",
+                        whiteSpace: "pre-wrap",
+                        position: "absolute",
+                        top: "5%",
+                        left: "0",
+                        right: "0",
+                        bottom: "35%",
+                    }}
+                >
+                    <img
+                        src="/nsov2.png"
+                        alt="NSO v2"
+                        style={{ width: "450px", height: "80%", objectFit: "contain" }}
+                    />
+                    <div style={{ marginBottom: "20px" }}>NEXT click 'Mint NSO v2'</div>
+                    <div style={{ marginBottom: "20px" }}>to claim your pass</div>
+                    <div style={{ fontSize: ".5em", fontStyle: "italic" }}>photo by @jacque - styled by @uzzy</div>
+                </div>
+                <div
+                    className="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "75px", display: "flex" }}
+                    />
+                </div>
+            </div>
+        ),
+        intents: [<Button.Transaction target="/claim">Mint NSO v2</Button.Transaction>],
+        title: "Mint NSO v2",
+    });
+});
+
+app.frame("/success", onchainDataMiddleware, async (c) => {
+    return c.res({
+        action: "/",
+        image: (
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    background: "black",
+                    backgroundSize: "100% 100%",
+                    height: "100%",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    width: "100%",
+                    padding: "20px",
+                    borderRadius: "15px",
+                    boxShadow: "0 4px 8px rgba(0, 0, 0, 0.1)",
+                }}
+            >
+                <img
+                    src="https://grnd-stats.fly.dev/logo.png"
+                    alt="UNDRGRND logo"
+                    style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.5 }}
+                />
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        color: "white",
+                        fontSize: "1.5em",
+                        fontStyle: "normal",
+                        letterSpacing: "-0.025em",
+                        lineHeight: 1.4,
+                        marginTop: "20px",
+                        padding: "0",
+                        whiteSpace: "pre-wrap",
+                        position: "absolute",
+                        top: "30%",
+                    }}
+                >
+                    <div style={{ marginBottom: "20px" }}>Success!</div>
+                    <div style={{ marginBottom: "20px" }}>Welcome to Season 2!</div>
+                    <div style={{ marginBottom: "20px" }}>Share & Follow our channels 👇</div>
+                </div>
+                <div
+                    className="footer"
+                    style={{
+                        display: "flex",
+                        backgroundColor: "white",
+                        padding: "10px",
+                        margin: "15px auto",
+                        borderRadius: "15px",
+                        border: "2px dashed #000",
+                    }}
+                >
+                    <img
+                        src="https://grnd-stats.fly.dev/skllzrmy.png"
+                        alt="skllzrmys logo"
+                        style={{ width: "75px", display: "flex" }}
+                    />
+                </div>
+            </div>
+        ),
+        intents: [
+            <Button.Redirect location="https://warpcast.com/~/compose?text=I%20just%20minted%20Never%20Sell%20Out%20vol%2002%20in%20frame%21%20by%20%40skllzrmy&embeds[]=https://grnd-stats.fly.dev/">
+                Share
+            </Button.Redirect>,
+            <Button.Redirect location="https://warpcast.com/~/channel/neversellout/">/neversellout</Button.Redirect>,
+            <Button.Redirect location="https://warpcast.com/~/channel/undrgrnd/">/undrgrnd</Button.Redirect>,
+            <Button action="/">Back</Button>,
+        ],
+        title: "Success!",
+    });
+});
+
+app.transaction("/approve", onchainDataMiddleware, async (c) => {
+    const address: `0x${string}` = c.address as `0x${string}`;
+    const tokenContractAddress: `0x${string}` = "0xD94393cd7fCCeb749cD844E89167d4a2CDC64541";
+    const nftContractAddress: `0x${string}` = "0x2d3819c5b92f813848229d9294F84CF2e55014A1";
+    const amount = BigInt("10000000000000000000000000"); // 10 million tokens in wei
+
+    const erc20ABI = [
+        {
+            inputs: [
+                { internalType: "address", name: "spender", type: "address" },
+                { internalType: "uint256", name: "amount", type: "uint256" },
+            ],
+            name: "approve",
+            outputs: [{ internalType: "bool", name: "", type: "bool" }],
+            stateMutability: "nonpayable",
+            type: "function",
+        },
+    ] as const;
+
+    try {
+        const approveTx = c.contract({
+            abi: erc20ABI,
+            chainId: "eip155:8453",
+            functionName: "approve",
+            args: [nftContractAddress, amount],
+            to: tokenContractAddress,
+        });
+
+        return approveTx;
+    } catch (error) {
+        conErr("Approval transaction preparation failed", error);
+        throw new Error("Approval transaction preparation failed");
+    }
+});
+
+app.transaction("/claim", onchainDataMiddleware, async (c) => {
+    const { address } = c;
+    const nftContractAddress: `0x${string}` = "0x2d3819c5b92f813848229d9294F84CF2e55014A1";
+    const tokenContractAddress: `0x${string}` = "0xD94393cd7fCCeb749cD844E89167d4a2CDC64541";
+    const amount = BigInt("10000000000000000000000000"); // 10 million tokens in wei
+    const quantity = BigInt("1"); // Quantity of tokens to mint, assuming 18 decimals
+
+    const nsoABI = [
+        {
+            inputs: [
+                { internalType: "address", name: "_receiver", type: "address" },
+                { internalType: "uint256", name: "_quantity", type: "uint256" },
+                { internalType: "address", name: "_currency", type: "address" },
+                { internalType: "uint256", name: "_pricePerToken", type: "uint256" },
+                {
+                    internalType: "tuple",
+                    name: "_allowlistProof",
+                    type: "tuple",
+                    components: [
+                        { internalType: "bytes32[]", name: "proof", type: "bytes32[]" },
+                        { internalType: "uint256", name: "quantityLimitPerWallet", type: "uint256" },
+                        { internalType: "uint256", name: "pricePerToken", type: "uint256" },
+                        { internalType: "address", name: "currency", type: "address" },
+                    ],
+                },
+                { internalType: "bytes", name: "_data", type: "bytes" },
+            ],
+            name: "claim",
+            outputs: [],
+            stateMutability: "payable",
+            type: "function",
+        },
+    ] as const;
+
+    const allowlistProof = {
+        proof: ["0x0000000000000000000000000000000000000000000000000000000000000000"] as const,
+        quantityLimitPerWallet: quantity,
+        pricePerToken: amount,
+        currency: tokenContractAddress,
+    };
+
+    try {
+        const claimTx = c.contract({
+            abi: nsoABI,
+            chainId: "eip155:8453",
+            functionName: "claim",
+            args: [address, quantity, tokenContractAddress, amount, allowlistProof, "0x"],
+            to: nftContractAddress,
+        });
+
+        return claimTx;
+    } catch (error) {
+        conErr("Claim transaction preparation failed", error);
+        throw new Error("Claim transaction preparation failed");
+    }
 });
 
 app.use("/*", serveStatic({ root: "./public" }));
@@ -1168,5 +1468,5 @@ if (typeof Bun !== "undefined") {
         fetch: app.fetch,
         port: 3000,
     });
-    console.log("Server is running on port 3000");
+    conLog("Server is running on port 3000");
 }

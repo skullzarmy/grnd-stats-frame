@@ -3,6 +3,7 @@
         "module": "NodeNext",
         "strict": true,
         "jsx": "react-jsx",
-        "jsxImportSource": "@airstack/frog/jsx"
+        "jsxImportSource": "@airstack/frog/jsx",
+        "types": ["react", "react-dom"]
     }
 }

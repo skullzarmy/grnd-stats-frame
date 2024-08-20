@@ -11,6 +11,7 @@ import { serveStatic } from "frog/serve-static";
 import Fuse from "fuse.js";
 import { getNSOPassHolders } from "./duneCache.js";
 import { fetchCachedAirstackQuery } from "./airstackCache.js";
+import { getUserByFID, getUserDataByFID } from "./pinataApi.js";
 import { conLog, conErr } from "./logUtils.js";
 const DEBUG = process.env.DEBUG === "true";
 conLog("Debug mode:", DEBUG);
@@ -97,6 +98,10 @@ function normalizeAddress(address: string): string | null {
 }
 
 function normalizeWallets(wallets: string[] | string): string[] {
+    if (!wallets) {
+        return [];
+    }
+
     if (typeof wallets === "string") {
         try {
             wallets = JSON.parse(wallets);
@@ -132,26 +137,44 @@ async function resolveInput(inputText: string | number): Promise<NSOPassHolder |
     let inputString = String(inputText).trim().toLowerCase();
     conLog("Processed input as string:", inputString);
 
-    // Check if input is a numeric fid
+    // Check if input is a numeric FID
     if (/^\d+$/.test(inputString)) {
-        conLog("Input is recognized as a numeric FID:", inputString);
-        const fidMatch = nsoPassHolders.find((holder) => String(holder.fid) === inputString);
+        const fid = parseInt(inputString, 10);
+
+        // First, attempt to resolve using local data
+        const fidMatch = nsoPassHolders.find((holder) => holder.fid === inputString);
         if (fidMatch) {
-            conLog("Matched by FID:", fidMatch);
+            conLog("Matched by FID in local data:", fidMatch);
             return fidMatch;
-        } else {
-            conLog(`No match found for FID: ${inputString}`);
-            return null;
         }
+
+        // If no match found locally, try using the Pinata API
+        conLog("Fetching data from Pinata API for FID:", fid);
+        const pinataUser = await getUserByFID(fid);
+
+        if (pinataUser) {
+            const userData = await getUserDataByFID(fid);
+            if (userData) {
+                conLog("Matched by FID from Pinata API:", pinataUser);
+                return {
+                    fid: String(pinataUser.fid),
+                    fname: pinataUser.username,
+                    verified_addresses: pinataUser.verified_addresses.eth_addresses,
+                    total_grnd_spent: 0, // You can update this with actual data if available
+                };
+            }
+        }
+
+        conLog(`No match found for FID: ${inputString}`);
+        return null;
     }
 
     // Check if input is an Ethereum address
     const normalizedAddress = normalizeAddress(inputString);
     if (normalizedAddress) {
-        // conLog("Input is recognized as an Ethereum address:", normalizedAddress);
         const addressMatch = nsoPassHolders.find((holder) => holder.verified_addresses.includes(normalizedAddress));
         if (addressMatch) {
-            // conLog("Matched by Ethereum address:", addressMatch);
+            conLog("Matched by Ethereum address:", addressMatch);
             return addressMatch;
         }
     }
@@ -159,7 +182,7 @@ async function resolveInput(inputText: string | number): Promise<NSOPassHolder |
     // Check if input is a direct match for fname
     const directMatch = nsoPassHolders.find((holder) => holder.fname.toLowerCase() === inputString);
     if (directMatch) {
-        // conLog("Matched by direct fname:", directMatch);
+        conLog("Matched by direct fname:", directMatch);
         return directMatch;
     }
 
@@ -171,12 +194,11 @@ async function resolveInput(inputText: string | number): Promise<NSOPassHolder |
     const fuse = new Fuse(nsoPassHolders, options);
     const fuzzyResults = fuse.search(inputString);
     if (fuzzyResults.length > 0) {
-        // conLog("Matched by fuzzy search:", fuzzyResults[0].item);
+        conLog("Matched by fuzzy search:", fuzzyResults[0].item);
         return fuzzyResults[0].item;
     }
 
-    // No match found
-    // conLog("No match found for input:", inputString);
+    conLog("No match found for input:", inputString);
     return null;
 }
 
@@ -599,7 +621,7 @@ app.image("/img/stat/:fid/:timestamp?", async (c) => {
     // Fetch the GRND balance for the verified addresses of the NSO pass holder
     const grndBalance = await fetchGRNDBalance(nsoPassHolder.verified_addresses);
 
-    const profileName = nsoPassHolder.fname;
+    // const profileName = nsoPassHolder.fname;
     const passHolderColor = nsoPassHolder ? "green" : "red";
     const latestSnapshotDate = await returnSnapshotDate();
 
@@ -622,8 +644,10 @@ app.image("/img/stat/:fid/:timestamp?", async (c) => {
         conLog("Fallback check not triggered.");
     }
 
-    const userDetails = await getFarcasterUserDetails({ fid });
-    const safeProfileImageUrl = userDetails?.data?.profileImage?.extraSmall ?? null;
+    const userDetails = await getUserByFID(parseInt(fid));
+    conLog("User details:", userDetails);
+    const safeProfileImageUrl = userDetails?.pfp_url ?? null;
+    const profileName = userDetails?.username ?? nsoPassHolder.fname;
 
     return c.res({
         image: (

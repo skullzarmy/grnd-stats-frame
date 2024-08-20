@@ -1,10 +1,17 @@
 import { Button, Frog, TextInput, TokenBlockchain } from "@airstack/frog";
-import { onchainDataFrogMiddleware as onchainData, fetchQuery } from "@airstack/frames";
+import {
+    onchainDataFrogMiddleware as onchainData,
+    fetchQuery,
+    getFarcasterUserDetails,
+    FarcasterUserDetailsInput,
+    FarcasterUserDetailsOutput,
+} from "@airstack/frames";
 import { devtools } from "frog/dev";
 import { serveStatic } from "frog/serve-static";
-import { parse } from "dotenv";
-import { DuneClient } from "@duneanalytics/client-sdk";
 import Fuse from "fuse.js";
+import { getNSOPassHolders } from "./duneCache.js";
+import { fetchCachedAirstackQuery } from "./airstackCache.js";
+import { conLog, conErr } from "./logUtils.js";
 const DEBUG = process.env.DEBUG === "true";
 conLog("Debug mode:", DEBUG);
 const onchainDataMiddleware = onchainData({
@@ -14,17 +21,6 @@ const onchainDataMiddleware = onchainData({
     },
 });
 
-const CURRENT_USER = process.env.CURRENT_USER;
-if (!CURRENT_USER) {
-    conErr("Current user is missing.");
-}
-const DUNE_API_KEY = process.env[`DUNE_API_KEY_${CURRENT_USER?.toUpperCase() ?? ""}`];
-const DUNE_QUERY_ID = process.env[`DUNE_QUERY_ID_${CURRENT_USER?.toUpperCase() ?? ""}`];
-if (!DUNE_API_KEY || !DUNE_QUERY_ID) {
-    conErr("Dune API key or query ID is missing.");
-}
-const duneClient = new DuneClient(DUNE_API_KEY ?? "");
-
 type NSOPassHolder = {
     fid: string;
     fname: string;
@@ -32,33 +28,11 @@ type NSOPassHolder = {
     total_grnd_spent: number;
 };
 
-function conLog(...args: any[]) {
-    if (DEBUG) {
-        console.log(...args);
-    }
-}
-
-function conErr(...args: any[]) {
-    if (DEBUG) {
-        console.error(...args);
-    }
-}
-
 // Fetch all NSO pass holder data from Dune
 async function fetchNSOPassHolders(): Promise<NSOPassHolder[]> {
     try {
-        const queryResult = await duneClient.getLatestResult({ queryId: parseInt(DUNE_QUERY_ID ?? "") });
-        if (!queryResult || !queryResult.result) {
-            conErr("Query result is missing or invalid");
-            return [];
-        }
-
-        return queryResult.result.rows.map((row: any) => ({
-            fid: row.fid,
-            fname: row.fname,
-            verified_addresses: row.verified_addresses,
-            total_grnd_spent: row.total_grnd_spent,
-        }));
+        const nsoPassHolders = await getNSOPassHolders();
+        return nsoPassHolders;
     } catch (error) {
         conErr("Error fetching NSO pass holders:", error);
         return [];
@@ -70,17 +44,14 @@ async function fetchGRNDBalance(wallets: string[] | string): Promise<number> {
         conErr("No wallet addresses provided.");
         return 0;
     }
-    conLog("Wallets:", wallets);
+
     const normalizedWallets = normalizeWallets(wallets);
     if (normalizedWallets.length === 0) {
         conErr("No valid wallet addresses found.");
         return 0;
     }
-    conLog("Normalized wallets:", normalizedWallets);
 
     const walletList = normalizedWallets.map((wallet) => `"${wallet}"`).join(", ");
-    conLog("Normalized wallet list:", walletList);
-
     const query = `query CheckTokenOwnership {
         TokenBalances(
           input: {
@@ -97,19 +68,23 @@ async function fetchGRNDBalance(wallets: string[] | string): Promise<number> {
         }
     }`;
 
-    const { data, error } = await fetchQuery(query);
-    if (error) {
-        conErr("Error fetching GRND balance:", error);
+    try {
+        const data = await fetchCachedAirstackQuery(query, `grnd_balance_${walletList}`);
+        if (!data) {
+            conErr("Failed to retrieve data from Airstack.");
+            return 0;
+        }
+
+        const totalBalance = data?.TokenBalances?.TokenBalance.reduce(
+            (acc: number, token: any) => acc + parseFloat(token.formattedAmount),
+            0
+        );
+
+        return totalBalance || 0;
+    } catch (error) {
+        conErr("Error fetching GRND balance:", error.message);
         return 0;
     }
-    conLog("GRND Balance Data:", data);
-
-    const totalBalance = data?.TokenBalances?.TokenBalance.reduce(
-        (acc: number, token: any) => acc + parseFloat(token.formattedAmount),
-        0
-    );
-    conLog("Total GRND Balance:", totalBalance);
-    return totalBalance || 0;
 }
 
 // Normalize Ethereum address
@@ -124,17 +99,18 @@ function normalizeAddress(address: string): string | null {
 function normalizeWallets(wallets: string[] | string): string[] {
     if (typeof wallets === "string") {
         try {
-            // Attempt to parse the string if it's a JSON stringified array
             wallets = JSON.parse(wallets);
         } catch {
-            // If parsing fails, assume it's a single address string
             wallets = [wallets];
         }
     }
 
     // Remove duplicates and normalize all addresses
-    const uniqueWallets = Array.from(new Set(wallets));
-    return uniqueWallets.map(normalizeAddress).filter((address): address is string => address !== null);
+    const uniqueWallets = Array.from(
+        new Set(wallets.map(normalizeAddress).filter((address): address is string => address !== null))
+    );
+
+    return uniqueWallets;
 }
 
 // Resolve user input to match against NSO pass holders
@@ -219,7 +195,7 @@ function formatNumber(num: number): string {
 }
 
 async function returnSnapshotDate(): Promise<string | null> {
-    return "Updated every 6h";
+    return "Updated every 12h";
 }
 
 function renderNotFoundScreen(c: any, customFID: string | null, debug: boolean = false) {
@@ -279,7 +255,9 @@ function renderNotFoundScreen(c: any, customFID: string | null, debug: boolean =
                     <div style={{ marginBottom: "20px", display: "flex" }}>
                         USER/FID {customFID ? `'${customFID}'` : ""} NOT FOUND 😢
                     </div>
-                    <div style={{ marginBottom: "20px" }}>THIS USER IS NOT A PASSHOLDER OR WAS NOT FOUND.</div>
+                    <div style={{ marginBottom: "20px", fontSize: ".8em" }}>
+                        THIS USER IS NOT A PASSHOLDER OR WAS NOT FOUND.
+                    </div>
                 </div>
                 <div
                     className="footer"
@@ -305,7 +283,7 @@ function renderNotFoundScreen(c: any, customFID: string | null, debug: boolean =
             <Button>🔎</Button>,
             <Button action="/approve-grnd">Mint NSO v2</Button>,
         ],
-        title: "UNDRGRND Stats",
+        title: "User Not Found",
     });
 
     if (debug) conLog("Rendered not found screen response:", response);
@@ -567,6 +545,7 @@ app.frame("/", onchainDataMiddleware, async (c) => {
 
 app.frame("/stats/:inputText?", onchainDataMiddleware, async (c) => {
     const { inputText, frameData } = c;
+    console.log("Frame Data:", frameData);
     const { fid } = frameData;
     const initialFID = parseInt(fid);
     const urlParamInputText = c.req.param("inputText");
@@ -593,7 +572,7 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async (c) => {
 
     return c.res({
         action: "/stats",
-        image: `/img/stat/${nsoPassHolder.fid}`,
+        image: `/img/stat/${nsoPassHolder.fid === "N/A" ? customFID : nsoPassHolder.fid}/${new Date().getTime()}`,
         intents: [
             <TextInput placeholder="FID, username, or wallet." />,
             <Button>🔎</Button>,
@@ -612,18 +591,10 @@ app.frame("/stats/:inputText?", onchainDataMiddleware, async (c) => {
 
 app.image("/img/stat/:fid/:timestamp?", async (c) => {
     const { fid } = c.req.param();
-    const parsedFID = parseInt(fid, 10);
-    conLog("Parsed FID:", parsedFID);
-    conLog("isNaN:", isNaN(parsedFID));
-    if (isNaN(parsedFID)) {
-        return renderNotFoundScreen(c, parsedFID.toString(), true); // Toggle debugging by setting the third parameter
-    }
-
-    const nsoPassHolders = await fetchNSOPassHolders();
-    const nsoPassHolder = nsoPassHolders.find((holder) => parseInt(holder.fid, 10) === parsedFID);
-    conLog("NSO Pass Holder:", !!nsoPassHolder);
+    conLog("Input from URL:", fid);
+    const nsoPassHolder = await resolveInput(fid);
     if (!nsoPassHolder) {
-        return renderNotFoundScreen(c, parsedFID.toString(), true); // Toggle debugging by setting the third parameter
+        return renderNotFoundScreen(c, fid.toString(), true); // Toggle debugging by setting the third parameter
     }
     // Fetch the GRND balance for the verified addresses of the NSO pass holder
     const grndBalance = await fetchGRNDBalance(nsoPassHolder.verified_addresses);
@@ -650,6 +621,10 @@ app.image("/img/stat/:fid/:timestamp?", async (c) => {
     } else {
         conLog("Fallback check not triggered.");
     }
+
+    const userDetails = await getFarcasterUserDetails({ fid });
+    const safeProfileImageUrl = userDetails?.data?.profileImage?.extraSmall ?? null;
+
     return c.res({
         image: (
             <div
@@ -690,7 +665,18 @@ app.image("/img/stat/:fid/:timestamp?", async (c) => {
                     }}
                 >
                     <div style={{ marginBottom: "5px", display: "flex", alignItems: "center" }}>
-                        <h2>{`@${profileName}`}</h2>
+                        {safeProfileImageUrl && (
+                            <img
+                                src={safeProfileImageUrl}
+                                alt={`${profileName}'s profile`}
+                                style={{ borderRadius: "50%", width: "50px", height: "50px", marginRight: "10px" }}
+                            />
+                        )}
+                        {profileName != "N/A" ? (
+                            <h2>{`@${profileName}`}</h2>
+                        ) : (
+                            <h2>{`${fid.slice(0, 4)}...${fid.slice(-4)}`}</h2>
+                        )}
                     </div>
 
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
